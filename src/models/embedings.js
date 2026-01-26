@@ -1,21 +1,43 @@
 const mongoose = require('mongoose');
 
-const documentVectorSchema = new mongoose.Schema({
-    documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', index: true },
-    pageNumber: Number,
-    chunkIndex: Number,
-    text: String,
-    embedding: {
-        type: [Number],
-        required: true
+const embeddingsSchema = new mongoose.Schema({
+    documentId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Document',
+        index: true,
     },
-    metadata: {
-        fileName: String,
-        parser: String,
-        category: String,
-        bookName: String,
-        authorName: String
-    }
-}, { timestamps: true });
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        index: true,
+    },
+    fileName: String,
+    pageNumber: Number,
+    text: String,
 
-module.exports = mongoose.model('DocumentVector', documentVectorSchema);
+    embedding: {
+        type: [Number], // 1536 floats
+        required: true,
+    },
+
+    metadata: {
+        bookName: String,
+        authorName: String,
+        category: String,
+    },
+    embeddingStatus: {
+        type: String,
+        enum: ['not_started', 'processing', 'completed'],
+        default: 'not_started',
+    },
+    embeddingProgress: {
+        currentPage: { type: Number, default: 0 },
+        currentChunk: { type: Number, default: 0 },
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now,
+    },
+});
+
+module.exports = mongoose.model('Embeddings', embeddingsSchema);

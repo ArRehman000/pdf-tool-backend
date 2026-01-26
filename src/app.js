@@ -8,7 +8,7 @@ const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const ocrRoutes = require('./routes/ocrRoutes');
 const documentRoutes = require('./routes/documentRoutes');
-
+const embeddingRoutes = require('./routes/embeddingRouted');
 
 /**
  * Initialize Express application
@@ -21,7 +21,7 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  origin: process.env.CLIENT_URL || 'http://localhost:3000 || https://pdocs.petalwebdev.com',
   credentials: true, // Allow cookies to be sent
   optionsSuccessStatus: 200,
 };
@@ -53,7 +53,7 @@ app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/ocr', ocrRoutes);
 app.use('/api/documents', documentRoutes);
-
+app.use('/api/embeddings', embeddingRoutes);
 /**
  * 404 Handler
  */

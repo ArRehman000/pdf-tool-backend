@@ -1,44 +1,71 @@
-const documentVectorModel = require("../models/Document");
-const Document = require("../models/Document");
-const { chunkText } = require("../utils/chunk");
-const { getEmbedding } = require("./openaiembedings");
+const Document = require('../models/Document');
+const Embeddings = require('../models/embedings');
+const chunkText = require('../utils/chunk');
+const { createEmbedding } = require('./openaiembedings');
 
-
-async function generateEmbeddingsForDocument(documentId) {
+async function processDocumentEmbeddings(documentId) {
     const document = await Document.findById(documentId);
 
     if (!document) throw new Error('Document not found');
 
-    console.log('🔵 Processing:', document.fileName);
+    console.log('▶ Starting embeddings for:', document.fileName);
 
-    for (const page of document.pagesData) {
+    document.embeddingStatus = 'processing';
+    await document.save();
+
+    for (let p = document.embeddingProgress.currentPage; p < document.pagesData.length; p++) {
+        const page = document.pagesData[p];
+        console.log(`📄 Processing Page ${page.pageNumber}`);
+
         const chunks = chunkText(page.text);
 
-        for (let i = 0; i < chunks.length; i++) {
-            const chunk = chunks[i];
+        for (
+            let c =
+                p === document.embeddingProgress.currentPage
+                    ? document.embeddingProgress.currentChunk
+                    : 0;
+            c < chunks.length;
+            c++
+        ) {
+            const chunk = chunks[c];
 
-            const embedding = await getEmbedding(chunk);
+            console.log(`   ➤ Chunk ${c + 1}/${chunks.length}`);
 
-            await documentVectorModel.create({
-                documentId: document._id,
-                pageNumber: page.pageNumber,
-                chunkIndex: i,
-                text: chunk,
-                embedding,
-                metadata: {
+            const embedding = await createEmbedding(chunk);
+
+            try {
+                await Embeddings.create({
+                    documentId: document._id,
+                    userId: document.userId,
                     fileName: document.fileName,
-                    parser: document.metadata?.parser,
-                    category: document.metadata?.category,
-                    bookName: document.metadata?.bookName,
-                    authorName: document.metadata?.authorName
-                }
-            });
+                    pageNumber: page.pageNumber,
+                    text: chunk,
+                    embedding,
+                    metadata: {
+                        bookName: document.metadata?.bookName,
+                        authorName: document.metadata?.authorName,
+                        category: document.metadata?.category,
+                    },
+                });
+            } catch (e) {
+                console.log('⚠ Duplicate chunk skipped');
+            }
 
-            console.log(`✅ Page ${page.pageNumber} Chunk ${i} embedded`);
+            // ✅ SAVE PROGRESS AFTER EVERY CHUNK
+            document.embeddingProgress.currentPage = p;
+            document.embeddingProgress.currentChunk = c + 1;
+            await document.save();
         }
+
+        // reset chunk when page completes
+        document.embeddingProgress.currentChunk = 0;
+        await document.save();
     }
 
-    console.log('🎉 Embedding completed for document:', documentId);
+    document.embeddingStatus = 'completed';
+    await document.save();
+
+    console.log('✅ Embedding Completed for:', document.fileName);
 }
 
-module.exports = { generateEmbeddingsForDocument };
+module.exports = { processDocumentEmbeddings };
