@@ -21,7 +21,7 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-  origin: process.env.CLIENT_URL || 'http://localhost:3000 || https://pdocs.petalwebdev.com',
+  origin: process.env.CLIENT_URL || 'https://pdocs.petalwebdev.com',
   credentials: true, // Allow cookies to be sent
   optionsSuccessStatus: 200,
 };
