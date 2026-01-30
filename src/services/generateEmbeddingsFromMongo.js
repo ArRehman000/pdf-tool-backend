@@ -22,7 +22,7 @@ async function processDocumentEmbeddings(documentId) {
         document.embeddingStatus = 'processing';
         await document.save();
 
-        // Collect all pages into a single array for one-time submission
+        // Collect all pages into a single array
         const allPages = document.pagesData;
         const allInputs = allPages.map(page => {
             const metadataStr = `[Metadata: Book: ${document.metadata?.bookName || 'N/A'}, Author: ${document.metadata?.authorName || 'N/A'}, Category: ${document.metadata?.category || 'N/A'}]`;
@@ -30,37 +30,54 @@ async function processDocumentEmbeddings(documentId) {
             return `${metadataStr} ${summaryStr}\n\n[Content]:\n${page.text}`;
         });
 
-        console.log(`\n🚀 Submitting ALL ${allPages.length} pages in a single synchronous request...`);
-        const embeddings = await createEmbedding(allInputs);
-        console.log('✅ Received all embeddings. Storing in database...');
+        const BATCH_SIZE = 20; // Safe number of pages to stay under token limits
+        console.log(`\n🚀 Processing ${allPages.length} pages in batches of ${BATCH_SIZE}...`);
 
-        // Process and save each embedding
-        for (let i = 0; i < allPages.length; i++) {
-            const page = allPages[i];
-            const embedding = embeddings[i];
+        for (let i = 0; i < allInputs.length; i += BATCH_SIZE) {
+            const currentBatchInputs = allInputs.slice(i, i + BATCH_SIZE);
+            const currentBatchPages = allPages.slice(i, i + BATCH_SIZE);
+            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+            const totalBatches = Math.ceil(allInputs.length / BATCH_SIZE);
 
-            try {
-                await Embeddings.create({
-                    documentId: document._id,
-                    userId: document.userId,
-                    fileName: document.fileName,
-                    pageNumber: page.pageNumber,
-                    chunkIndex: 0,
-                    text: page.text,
-                    embedding,
-                    metadata: {
-                        bookName: document.metadata?.bookName,
-                        authorName: document.metadata?.authorName,
-                        category: document.metadata?.category,
-                        summary: page.summary,
-                    },
-                });
-            } catch (e) {
-                // Unique index will prevent duplicates if resuming or re-running
-                if (e.code !== 11000) {
-                    console.error(`   ⚠ Error saving page ${page.pageNumber}:`, e.message);
+            console.log(`\n📦 Submitting Batch ${batchNum}/${totalBatches} (${currentBatchInputs.length} pages)...`);
+            const embeddings = await createEmbedding(currentBatchInputs);
+            console.log(`✅ Received Batch ${batchNum} embeddings. Storing...`);
+
+            // Process and save each embedding in the current batch
+            for (let j = 0; j < currentBatchPages.length; j++) {
+                const page = currentBatchPages[j];
+                const embedding = embeddings[j];
+
+                try {
+                    await Embeddings.create({
+                        documentId: document._id,
+                        userId: document.userId,
+                        fileName: document.fileName,
+                        pageNumber: page.pageNumber,
+                        chunkIndex: 0,
+                        text: page.text,
+                        embedding,
+                        metadata: {
+                            bookName: document.metadata?.bookName,
+                            authorName: document.metadata?.authorName,
+                            category: document.metadata?.category,
+                            summary: page.summary,
+                        },
+                    });
+                } catch (e) {
+                    // Unique index will prevent duplicates if resuming or re-running
+                    if (e.code !== 11000) {
+                        console.error(`   ⚠ Error saving page ${page.pageNumber}:`, e.message);
+                    }
                 }
             }
+
+            // Update progress in DB (optional but good for tracking)
+            document.embeddingProgress = {
+                currentPage: i + currentBatchInputs.length,
+                currentChunk: 0
+            };
+            await document.save();
         }
 
         console.log(`   ✅ All embeddings stored successfully`);
@@ -74,6 +91,7 @@ async function processDocumentEmbeddings(documentId) {
 
     } catch (err) {
         console.error('❌ Embedding Error:', err.message);
+        throw err; // Re-throw so the caller knows it failed
     } finally {
         runningJobs.delete(documentId);
     }

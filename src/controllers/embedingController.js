@@ -46,10 +46,10 @@ exports.startEmbedding = async (req, res) => {
             embeddingStatus: 'completed'
         });
     } catch (error) {
-        console.error('Embedding error in controller:', error);
-        res.status(500).json({
+        console.error('Embedding error in controller:', error.response?.data || error.message);
+        res.status(error.response?.status || 500).json({
             success: false,
-            message: 'Embedding failed: ' + error.message,
+            message: 'Embedding failed: ' + (error.response?.data?.error?.message || error.message),
             embeddingStatus: 'failed'
         });
     }
