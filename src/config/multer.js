@@ -42,14 +42,14 @@ const fileFilter = (req, file, cb) => {
 
 /**
  * Multer upload configuration
- * - Max file size: 10MB
+ * - Max file size: 150MB
  * - Allowed types: PDF, DOCX only
  */
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 50 * 1024 * 1024, // Increased to 50MB
-    fieldSize: 50 * 1024 * 1024, // Also increase field size for form data
+    fileSize: 150 * 1024 * 1024, // Increased to 150MB
+    fieldSize: 150 * 1024 * 1024, // Also increase field size for form data
   },
   fileFilter: fileFilter,
 });

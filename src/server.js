@@ -30,13 +30,16 @@ const startServer = async () => {
     await connectDB();
 
     // Start listening
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log('─────────────────────────────────────────');
       console.log(`✅ Server is running on port ${PORT}`);
       console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`🌐 API URL: http://localhost:${PORT}`);
       console.log('─────────────────────────────────────────');
     });
+
+    // Increase server timeout to 10 minutes for large file uploads
+    server.timeout = 600000;
   } catch (error) {
     console.error('❌ Failed to start server:', error.message);
     process.exit(1);
