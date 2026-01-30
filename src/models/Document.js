@@ -112,6 +112,12 @@ const documentSchema = new mongoose.Schema({
     currentChunk: { type: Number, default: 0 },
   },
 
+  parsingStatus: {
+    type: String,
+    enum: ['pending', 'processing', 'completed', 'failed'],
+    default: 'completed', // Default to completed for existing documents
+  },
+
 });
 
 // Update the updatedAt timestamp before saving

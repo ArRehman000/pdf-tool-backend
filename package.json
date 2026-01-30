@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "build": "npm run build",
     "seed:admin": "node src/seed/adminSeed.js",
     "reset:admin": "node src/seed/resetAdmin.js"
   },

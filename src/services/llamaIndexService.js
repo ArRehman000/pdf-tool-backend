@@ -119,7 +119,8 @@ const monitorJob = async (client, jobId) => {
   console.log(`Waiting for parsing job ${jobId} to complete...`);
   let jobStatus = 'pending';
   let attempts = 0;
-  const maxAttempts = 60; // 60 attempts * 2 seconds = 2 minutes max
+  // Increase timeout: default 300 attempts * 2 seconds = 10 minutes
+  const maxAttempts = parseInt(process.env.LLAMAINDEX_MAX_ATTEMPTS, 10) || 300;
   let jobResult = null;
 
   while (jobStatus !== 'SUCCESS' && attempts < maxAttempts) {

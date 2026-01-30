@@ -23,6 +23,11 @@ const deleteFile = (filePath) => {
  * POST /api/ocr/process
  * Protected route - requires authentication
  */
+/**
+ * Process document using Mistral OCR or LlamaIndex (Asynchronous)
+ * POST /api/ocr/process
+ * Protected route - requires authentication
+ */
 const processDocument = async (req, res) => {
   let filePath = null;
 
@@ -69,164 +74,159 @@ const processDocument = async (req, res) => {
       });
     }
 
-    console.log(`Processing file: ${req.file.originalname} with ${parser} parser`);
+    console.log(`Processing file: ${req.file.originalname} with ${parser} parser (Async)`);
 
-    // Process with selected parser
-    let fullText, ocrResponse, parserMetadata;
+    // Create a database entry with 'processing' status first
+    const newDocument = await Document.create({
+      userId: req.user.userId,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      fileType: req.file.mimetype,
+      originalText: 'Processing...', // Placeholder
+      parsingStatus: 'processing',
+      metadata: {
+        parser: parser,
+        processedAt: new Date(),
+        ...(book_name && { bookName: book_name.trim() }),
+        ...(author_name && { authorName: author_name.trim() }),
+        ...(category && { category: category.trim() }),
+      },
+    });
 
-    if (parser === 'llama') {
-      // Use LlamaIndex parser
-      const llamaResult = await llamaIndexService.parseDocument(filePath, req.file.originalname);
+    // Run the actual processing in the background (DO NOT AWAIT)
+    backgroundProcessDocument(
+      newDocument._id,
+      filePath,
+      req.file.originalname,
+      parser,
+      {
+        table_format,
+        extract_header,
+        extract_footer,
+        include_image_base64,
+      }
+    ).catch(err => {
+      console.error(`Background processing failed for ${newDocument._id}:`, err);
+    });
 
-      fullText = llamaResult.text;
-      parserMetadata = {
-        parser: 'llama',
-        model: llamaResult.metadata.model,
-        jobId: llamaResult.jobId,
-        pageCount: llamaResult.metadata.pageCount,
-        processingTime: llamaResult.metadata.processingTime,
-      };
-
-      // Delete temporary file
-      deleteFile(filePath);
-
-      // Use actual pages from LlamaIndex
-      ocrResponse = {
-        pages: llamaResult.pages || [{
-          pageNumber: 1,
-          markdown: fullText,
-          text: fullText,
-        }],
-        model: llamaResult.metadata.model,
-      };
-
-      console.log(`LlamaIndex extracted ${ocrResponse.pages.length} pages`);
-    } else {
-      // Use Mistral parser (via Service)
-      const mistralResult = await mistralService.processDocument(
-        filePath,
-        req.file.originalname,
-        {
-          includeImageBase64: include_image_base64 === 'true' || include_image_base64 === true
-        }
-      );
-
-      // Delete temporary file
-      deleteFile(filePath);
-
-      ocrResponse = mistralResult;
-
-      const pages = ocrResponse.pages || [];
-      fullText = pages.map(page => page.markdown).join('\n\n');
-
-      parserMetadata = {
-        parser: 'mistral',
-        model: ocrResponse.model,
-        usage: ocrResponse.usage || ocrResponse.usageInfo,
-      };
-    }
-
-    // Check if user wants to save the document
-    const saveDocument = req.body.save_document === 'true' || req.body.save_document === true;
-
-    let savedDocument = null;
-
-    if (saveDocument) {
-      // Structure page-by-page data with metadata
-      const pagesData = ocrResponse.pages.map((page, index) => {
-        const pageText = page.text || page.markdown || '';
-        return {
-          pageNumber: page.page_number || index + 1,
-          text: pageText,
-          markdown: page.markdown || pageText,
-          tables: page.tables || [],
-          images: page.images || [],
-          header: page.header || null,
-          footer: page.footer || null,
-          metadata: {
-            confidence: page.confidence || null,
-            processingTime: page.processing_time || null,
-            wordCount: pageText.split(/\s+/).filter(w => w.length > 0).length,
-            characterCount: pageText.length,
-          },
-          summary: page.summary || null,
-        };
-      });
-
-      // Save document to database with page-by-page structure
-      savedDocument = await Document.create({
-        userId: req.user.userId,
+    // Return the document ID immediately
+    return res.status(202).json({
+      success: true,
+      message: 'Document upload successful. Processing started in background.',
+      data: {
+        documentId: newDocument._id,
         fileName: req.file.originalname,
         fileSize: req.file.size,
         fileType: req.file.mimetype,
-        originalText: fullText,
-        pages: ocrResponse.pages.length,
-        pagesData: pagesData,
-        detailedPages: ocrResponse.pages,
-        tables: ocrResponse.pages.flatMap(page => page.tables || []),
-        images: ocrResponse.pages.flatMap(page => page.images || []),
-        metadata: {
-          ...parserMetadata,
-          processedAt: new Date(),
-          pageCount: ocrResponse.pages.length,
-          ...(book_name && { bookName: book_name.trim() }),
-          ...(author_name && { authorName: author_name.trim() }),
-          ...(category && { category: category.trim() }),
-        },
-      });
-
-      console.log(`Document saved with ID: ${savedDocument._id} (${pagesData.length} pages)`);
-    }
-
-    // Return processed data
-    return res.status(200).json({
-      success: true,
-      message: saveDocument ? 'Document processed and saved successfully' : 'Document processed successfully',
-      data: {
-        fileName: req.file.originalname,
-        fileSize: req.file.size,
-        pages: ocrResponse.pages.length,
-        fullText: fullText,
-        detailedPages: ocrResponse.pages,
         parser: parser,
-        ...parserMetadata,
-        ...(savedDocument && { documentId: savedDocument._id, saved: true }),
+        status: 'processing'
       },
     });
+
   } catch (error) {
     if (filePath) deleteFile(filePath);
-
-    console.error('OCR processing error:', error);
-
-    // Handle specific API key errors
-    if (error.message && error.message.includes('MISTRAL_API_KEY')) {
-      return res.status(500).json({
-        success: false,
-        message: 'Mistral API key is not configured.',
-        error: error.message,
-      });
-    }
-
+    console.error('OCR initialization error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to process document',
+      message: 'Failed to initialize document processing',
       error: error.message,
     });
   }
 };
 
 /**
- * Process document from URL using Mistral OCR or LlamaIndex
+ * Internal helper for background processing
+ */
+const backgroundProcessDocument = async (documentId, filePath, originalName, parser, options) => {
+  try {
+    let fullText, ocrResponse, parserMetadata;
+
+    if (parser === 'llama') {
+      const llamaResult = await llamaIndexService.parseDocument(filePath, originalName);
+      fullText = llamaResult.text;
+      parserMetadata = {
+        model: llamaResult.metadata.model,
+        jobId: llamaResult.jobId,
+        pageCount: llamaResult.metadata.pageCount,
+        processingTime: llamaResult.metadata.processingTime,
+      };
+      ocrResponse = {
+        pages: llamaResult.pages || [{ pageNumber: 1, text: fullText, markdown: fullText }],
+        model: llamaResult.metadata.model,
+      };
+    } else {
+      const mistralResult = await mistralService.processDocument(
+        filePath,
+        originalName,
+        { includeImageBase64: options.include_image_base64 === 'true' || options.include_image_base64 === true }
+      );
+      ocrResponse = mistralResult;
+      fullText = ocrResponse.pages.map(page => page.markdown).join('\n\n');
+      parserMetadata = {
+        model: ocrResponse.model,
+        usage: ocrResponse.usage || ocrResponse.usageInfo,
+      };
+    }
+
+    // Cleanup file
+    deleteFile(filePath);
+
+    // Update document in database
+    const pagesData = ocrResponse.pages.map((page, index) => {
+      const pageText = page.text || page.markdown || '';
+      return {
+        pageNumber: page.page_number || index + 1,
+        text: pageText,
+        markdown: page.markdown || pageText,
+        tables: page.tables || [],
+        images: page.images || [],
+        header: page.header || null,
+        footer: page.footer || null,
+        metadata: {
+          confidence: page.confidence || null,
+          processingTime: page.processing_time || null,
+          wordCount: pageText.split(/\s+/).filter(w => w.length > 0).length,
+          characterCount: pageText.length,
+        },
+        summary: page.summary || null,
+      };
+    });
+
+    await Document.findByIdAndUpdate(documentId, {
+      originalText: fullText,
+      pages: ocrResponse.pages.length,
+      pagesData: pagesData,
+      detailedPages: ocrResponse.pages,
+      tables: ocrResponse.pages.flatMap(page => page.tables || []),
+      images: ocrResponse.pages.flatMap(page => page.images || []),
+      parsingStatus: 'completed',
+      'metadata.model': parserMetadata.model,
+      'metadata.jobId': parserMetadata.jobId,
+      'metadata.pageCount': ocrResponse.pages.length,
+      'metadata.processingTime': parserMetadata.processingTime,
+      'metadata.usage': parserMetadata.usage,
+    });
+
+    console.log(`✅ Background processing completed for ${documentId}`);
+  } catch (error) {
+    console.error(`❌ Background processing failed for ${documentId}:`, error);
+    await Document.findByIdAndUpdate(documentId, {
+      parsingStatus: 'failed',
+      metadata: { error: error.message }
+    });
+    if (filePath) deleteFile(filePath);
+  }
+};
+
+/**
+ * Process document from URL (Asynchronous)
  * POST /api/ocr/process-url
- * Protected route - requires authentication
  */
 const processDocumentFromUrl = async (req, res) => {
   try {
     const {
       document_url,
       parser = 'mistral',
-      save_document = false,
-      include_image_base64 = false,
       book_name,
       author_name,
       category,
@@ -236,104 +236,156 @@ const processDocumentFromUrl = async (req, res) => {
       return res.status(400).json({ success: false, message: 'document_url is required' });
     }
 
-    console.log(`Processing document from URL: ${document_url} with ${parser} parser`);
+    console.log(`Processing document from URL: ${document_url} with ${parser} parser (Async)`);
 
+    // Create entry
+    const newDocument = await Document.create({
+      userId: req.user.userId,
+      fileName: path.basename(document_url),
+      fileSize: 0,
+      fileType: 'url',
+      originalText: 'Processing URL...',
+      parsingStatus: 'processing',
+      metadata: {
+        parser: parser,
+        documentUrl: document_url,
+        processedAt: new Date(),
+        ...(book_name && { bookName: book_name.trim() }),
+        ...(author_name && { authorName: author_name.trim() }),
+        ...(category && { category: category.trim() }),
+      },
+    });
+
+    // Background process
+    backgroundProcessUrl(newDocument._id, document_url, parser).catch(err => {
+      console.error(`Background URL processing failed for ${newDocument._id}:`, err);
+    });
+
+    return res.status(202).json({
+      success: true,
+      message: 'Document URL submitted. Processing started in background.',
+      data: {
+        documentId: newDocument._id,
+        status: 'processing'
+      }
+    });
+
+  } catch (error) {
+    console.error('URL OCR initialization error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to initialize document URL processing',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Internal helper for background URL processing
+ */
+const backgroundProcessUrl = async (documentId, documentUrl, parser) => {
+  try {
     let fullText, ocrResponse, parserMetadata;
 
     if (parser === 'llama') {
       const llamaResult = await llamaIndexService.parseDocumentFromUrl(document_url);
       fullText = llamaResult.text;
       parserMetadata = {
-        parser: 'llama',
         model: llamaResult.metadata.model,
         jobId: llamaResult.jobId,
         pageCount: llamaResult.metadata.pageCount,
         processingTime: llamaResult.metadata.processingTime,
       };
       ocrResponse = {
-        pages: llamaResult.pages || [{ pageNumber: 1, markdown: fullText, text: fullText }],
-        model: llamaResult.metadata.model,
+        pages: llamaResult.pages,
+        model: llamaResult.metadata.model
       };
     } else {
-      // Mistral Service
-      const mistralResult = await mistralService.processDocumentFromUrl(
-        document_url,
-        { includeImageBase64: include_image_base64 === 'true' || include_image_base64 === true }
-      );
-
+      const mistralResult = await mistralService.processDocumentFromUrl(documentUrl);
       ocrResponse = mistralResult;
-      const pages = ocrResponse.pages || [];
-      fullText = pages.map(page => page.markdown).join('\n\n');
+      fullText = ocrResponse.pages.map(page => page.markdown).join('\n\n');
       parserMetadata = {
-        parser: 'mistral',
         model: ocrResponse.model,
-        usage: ocrResponse.usage || ocrResponse.usageInfo,
+        usage: ocrResponse.usage || ocrResponse.usageInfo
       };
     }
 
-    // Check if user wants to save the document
-    const shouldSave = save_document === 'true' || save_document === true;
-    let savedDocument = null;
-
-    if (shouldSave) {
-      const pagesData = ocrResponse.pages.map((page, index) => {
-        const pageText = page.text || page.markdown || '';
-        return {
-          pageNumber: page.page_number || index + 1,
-          text: pageText,
-          markdown: page.markdown || pageText,
-          metadata: {
-            wordCount: pageText.split(/\s+/).filter(w => w.length > 0).length,
-            characterCount: pageText.length,
-          },
-        };
-      });
-
-      savedDocument = await Document.create({
-        userId: req.user.userId,
-        fileName: path.basename(document_url),
-        fileSize: 0,
-        fileType: 'url',
-        originalText: fullText,
-        pages: ocrResponse.pages.length,
-        pagesData: pagesData,
-        detailedPages: ocrResponse.pages,
+    const pagesData = ocrResponse.pages.map((page, index) => {
+      const pageText = page.text || page.markdown || '';
+      return {
+        pageNumber: page.page_number || index + 1,
+        text: pageText,
+        markdown: page.markdown || pageText,
         metadata: {
-          ...parserMetadata,
-          processedAt: new Date(),
-          pageCount: ocrResponse.pages.length,
-          documentUrl: document_url,
-          ...(book_name && { bookName: book_name.trim() }),
-          ...(author_name && { authorName: author_name.trim() }),
-          ...(category && { category: category.trim() }),
+          wordCount: pageText.split(/\s+/).filter(w => w.length > 0).length,
+          characterCount: pageText.length,
         },
-      });
+      };
+    });
+
+    await Document.findByIdAndUpdate(documentId, {
+      originalText: fullText,
+      pages: ocrResponse.pages.length,
+      pagesData: pagesData,
+      detailedPages: ocrResponse.pages,
+      parsingStatus: 'completed',
+      'metadata.model': parserMetadata.model,
+      'metadata.jobId': parserMetadata.jobId,
+      'metadata.pageCount': ocrResponse.pages.length,
+      'metadata.processingTime': parserMetadata.processingTime,
+      'metadata.usage': parserMetadata.usage,
+    });
+
+    console.log(`✅ Background URL processing completed for ${documentId}`);
+  } catch (error) {
+    console.error(`❌ Background URL processing failed for ${documentId}:`, error);
+    await Document.findByIdAndUpdate(documentId, {
+      parsingStatus: 'failed',
+      metadata: { error: error.message }
+    });
+  }
+};
+
+/**
+ * Get document processing status
+ * GET /api/ocr/status/:id
+ */
+const getDocumentStatus = async (req, res) => {
+  try {
+    const document = await Document.findById(req.params.id);
+
+    if (!document) {
+      return res.status(404).json({ success: false, message: 'Document not found' });
+    }
+
+    // Check ownership
+    if (document.userId.toString() !== req.user.userId && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
     return res.status(200).json({
       success: true,
-      message: shouldSave ? 'Document processed and saved successfully' : 'Document processed successfully',
-      data: {
-        documentUrl: document_url,
-        pages: ocrResponse.pages.length,
-        fullText: fullText,
-        detailedPages: ocrResponse.pages,
-        parser: parser,
-        ...parserMetadata,
-        ...(savedDocument && { documentId: savedDocument._id, saved: true }),
-      },
+      status: document.parsingStatus,
+      data: document.parsingStatus === 'completed' ? {
+        documentId: document._id,
+        fileName: document.fileName,
+        fileSize: document.fileSize,
+        fileType: document.fileType,
+        pages: document.pages,
+        fullText: document.originalText,
+        detailedPages: document.pagesData,
+        ...document.metadata
+      } : null,
+      error: document.parsingStatus === 'failed' ? document.metadata.error : null
     });
   } catch (error) {
-    console.error('OCR processing error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to process document from URL',
-      error: error.message,
-    });
+    console.error('Error fetching document status:', error);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
 module.exports = {
   processDocument,
   processDocumentFromUrl,
+  getDocumentStatus,
 };
