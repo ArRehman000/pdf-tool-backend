@@ -212,7 +212,7 @@ const backgroundProcessDocument = async (documentId, filePath, originalName, par
     console.error(`❌ Background processing failed for ${documentId}:`, error);
     await Document.findByIdAndUpdate(documentId, {
       parsingStatus: 'failed',
-      metadata: { error: error.message }
+      'metadata.error': error.message
     });
     if (filePath) deleteFile(filePath);
   }
@@ -341,7 +341,7 @@ const backgroundProcessUrl = async (documentId, documentUrl, parser) => {
     console.error(`❌ Background URL processing failed for ${documentId}:`, error);
     await Document.findByIdAndUpdate(documentId, {
       parsingStatus: 'failed',
-      metadata: { error: error.message }
+      'metadata.error': error.message
     });
   }
 };

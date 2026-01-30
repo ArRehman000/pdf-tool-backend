@@ -31,31 +31,26 @@ exports.startEmbedding = async (req, res) => {
         });
     }
 
-    console.log('▶ API Start Embedding:', documentId);
+    console.log('▶ API Start Embedding (Sync):', documentId);
 
-    const job = processDocumentEmbeddings(documentId);
-    runningJobs.set(documentId, job);
+    try {
+        // Run synchronously so frontend stays in loading state
+        const job = processDocumentEmbeddings(documentId);
+        runningJobs.set(documentId, job);
 
-    res.json({
-        success: true,
-        message: document.embeddingStatus === 'processing'
-            ? 'Embedding resumed'
-            : 'Embedding started',
-        embeddingStatus: 'processing'
-    });
-};
+        await job;
 
-exports.stopEmbedding = async (req, res) => {
-    const { documentId } = req.body;
-
-    runningJobs.delete(documentId);
-
-    await Document.findByIdAndUpdate(documentId, {
-        embeddingStatus: 'not_started'
-    });
-
-    res.json({
-        success: true,
-        message: 'Embedding stopped. Resume anytime.',
-    });
+        res.json({
+            success: true,
+            message: 'Embedding completed successfully',
+            embeddingStatus: 'completed'
+        });
+    } catch (error) {
+        console.error('Embedding error in controller:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Embedding failed: ' + error.message,
+            embeddingStatus: 'failed'
+        });
+    }
 };

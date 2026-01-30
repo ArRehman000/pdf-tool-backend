@@ -135,7 +135,8 @@ const monitorJob = async (client, jobId) => {
       jobResult = statusResponse.data;
       return jobResult;
     } else if (jobStatus === 'ERROR' || jobStatus === 'FAILED') {
-      throw new Error(`Parsing job failed with status: ${jobStatus}`);
+      const errorMessage = statusResponse.data.error_message || statusResponse.data.detail || `Parsing job failed with status: ${jobStatus}`;
+      throw new Error(errorMessage);
     }
 
     attempts++;
