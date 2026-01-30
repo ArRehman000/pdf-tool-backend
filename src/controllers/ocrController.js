@@ -1,21 +1,8 @@
-const { Mistral } = require('@mistralai/mistralai');
 const fs = require('fs');
 const path = require('path');
 const Document = require('../models/Document');
 const llamaIndexService = require('../services/llamaIndexService');
-
-/**
- * Initialize Mistral client
- */
-const getMistralClient = () => {
-  const apiKey = process.env.MISTRAL_API_KEY;
-
-  if (!apiKey) {
-    throw new Error('MISTRAL_API_KEY is not set in environment variables');
-  }
-
-  return new Mistral({ apiKey });
-};
+const mistralService = require('../services/mistralService');
 
 /**
  * Delete temporary uploaded file
@@ -38,7 +25,6 @@ const deleteFile = (filePath) => {
  */
 const processDocument = async (req, res) => {
   let filePath = null;
-  let uploadedFileId = null;
 
   try {
     // Check if file was uploaded
@@ -64,8 +50,8 @@ const processDocument = async (req, res) => {
 
     // Get options from request body
     const {
-      parser = 'mistral', // Options: 'mistral', 'llama'
-      table_format = 'html', // Options: null, 'markdown', 'html' (Mistral only)
+      parser = 'mistral',
+      table_format = 'html',
       extract_header = false,
       extract_footer = false,
       include_image_base64 = false,
@@ -116,63 +102,27 @@ const processDocument = async (req, res) => {
 
       console.log(`LlamaIndex extracted ${ocrResponse.pages.length} pages`);
     } else {
-      // Use Mistral parser (default) - PDF/DOCX only
-      const client = getMistralClient();
-
-      console.log('Uploading document to Mistral...');
-
-      // Read file as buffer/Uint8Array
-      const fileBuffer = fs.readFileSync(filePath);
-      const uint8Array = new Uint8Array(fileBuffer);
-
-      // Upload file to Mistral
-      const uploadedFile = await client.files.upload({
-        file: {
-          fileName: req.file.originalname,
-          content: uint8Array,
-        },
-        purpose: 'ocr',
-      });
-
-      uploadedFileId = uploadedFile.id;
-      console.log(`File uploaded with ID: ${uploadedFileId}`);
-
-      const documentPayload = {
-        type: 'file',
-        fileId: uploadedFileId,
-      };
-
-      // Call Mistral OCR API
-      ocrResponse = await client.ocr.process({
-        model: 'mistral-ocr-latest',
-        document: documentPayload,
-        table_format: table_format === 'null' ? null : table_format,
-        extract_header: extract_header === 'true' || extract_header === true,
-        extract_footer: extract_footer === 'true' || extract_footer === true,
-        include_image_base64: include_image_base64 === 'true' || include_image_base64 === true,
-      });
+      // Use Mistral parser (via Service)
+      const mistralResult = await mistralService.processDocument(
+        filePath,
+        req.file.originalname,
+        {
+          includeImageBase64: include_image_base64 === 'true' || include_image_base64 === true
+        }
+      );
 
       // Delete temporary file
       deleteFile(filePath);
 
-      // Delete uploaded file from Mistral if it was uploaded
-      if (uploadedFileId) {
-        try {
-          await client.files.delete({ fileId: uploadedFileId });
-          console.log(`Deleted file from Mistral: ${uploadedFileId}`);
-        } catch (deleteError) {
-          console.error('Error deleting file from Mistral:', deleteError.message);
-        }
-      }
+      ocrResponse = mistralResult;
 
-      // Extract and format the response
       const pages = ocrResponse.pages || [];
       fullText = pages.map(page => page.markdown).join('\n\n');
 
       parserMetadata = {
         parser: 'mistral',
         model: ocrResponse.model,
-        usage: ocrResponse.usage_info,
+        usage: ocrResponse.usage || ocrResponse.usageInfo,
       };
     }
 
@@ -199,6 +149,7 @@ const processDocument = async (req, res) => {
             wordCount: pageText.split(/\s+/).filter(w => w.length > 0).length,
             characterCount: pageText.length,
           },
+          summary: page.summary || null,
         };
       });
 
@@ -210,15 +161,14 @@ const processDocument = async (req, res) => {
         fileType: req.file.mimetype,
         originalText: fullText,
         pages: ocrResponse.pages.length,
-        pagesData: pagesData, // NEW: Structured page-by-page data
-        detailedPages: ocrResponse.pages, // Legacy: Keep for backward compatibility
+        pagesData: pagesData,
+        detailedPages: ocrResponse.pages,
         tables: ocrResponse.pages.flatMap(page => page.tables || []),
         images: ocrResponse.pages.flatMap(page => page.images || []),
         metadata: {
           ...parserMetadata,
           processedAt: new Date(),
           pageCount: ocrResponse.pages.length,
-          // Optional document metadata
           ...(book_name && { bookName: book_name.trim() }),
           ...(author_name && { authorName: author_name.trim() }),
           ...(category && { category: category.trim() }),
@@ -244,21 +194,7 @@ const processDocument = async (req, res) => {
       },
     });
   } catch (error) {
-    // Delete temporary file in case of error
-    if (filePath) {
-      deleteFile(filePath);
-    }
-
-    // Delete uploaded file from Mistral if it was uploaded
-    if (uploadedFileId) {
-      try {
-        const client = getMistralClient();
-        await client.files.delete({ fileId: uploadedFileId });
-        console.log(`Deleted file from Mistral after error: ${uploadedFileId}`);
-      } catch (deleteError) {
-        console.error('Error deleting file from Mistral:', deleteError.message);
-      }
-    }
+    if (filePath) deleteFile(filePath);
 
     console.error('OCR processing error:', error);
 
@@ -266,15 +202,7 @@ const processDocument = async (req, res) => {
     if (error.message && error.message.includes('MISTRAL_API_KEY')) {
       return res.status(500).json({
         success: false,
-        message: 'Mistral API key is not configured. Please set MISTRAL_API_KEY in environment variables.',
-        error: error.message,
-      });
-    }
-
-    if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) {
-      return res.status(500).json({
-        success: false,
-        message: 'LlamaIndex API key is not configured. Please set LLAMAINDEX_API_KEY in environment variables.',
+        message: 'Mistral API key is not configured.',
         error: error.message,
       });
     }
@@ -297,25 +225,15 @@ const processDocumentFromUrl = async (req, res) => {
     const {
       document_url,
       parser = 'mistral',
-      table_format = 'html',
-      extract_header = false,
-      extract_footer = false
+      save_document = false,
+      include_image_base64 = false,
+      book_name,
+      author_name,
+      category,
     } = req.body;
 
-    // Validate URL
     if (!document_url) {
-      return res.status(400).json({
-        success: false,
-        message: 'document_url is required',
-      });
-    }
-
-    // Validate parser option
-    if (parser !== 'mistral' && parser !== 'llama') {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid parser option. Use "mistral" or "llama".',
-      });
+      return res.status(400).json({ success: false, message: 'document_url is required' });
     }
 
     console.log(`Processing document from URL: ${document_url} with ${parser} parser`);
@@ -323,9 +241,7 @@ const processDocumentFromUrl = async (req, res) => {
     let fullText, ocrResponse, parserMetadata;
 
     if (parser === 'llama') {
-      // Use LlamaIndex parser
       const llamaResult = await llamaIndexService.parseDocumentFromUrl(document_url);
-
       fullText = llamaResult.text;
       parserMetadata = {
         parser: 'llama',
@@ -334,52 +250,69 @@ const processDocumentFromUrl = async (req, res) => {
         pageCount: llamaResult.metadata.pageCount,
         processingTime: llamaResult.metadata.processingTime,
       };
-
-      // Use actual pages from LlamaIndex
       ocrResponse = {
-        pages: llamaResult.pages || [{
-          pageNumber: 1,
-          markdown: fullText,
-          text: fullText,
-        }],
+        pages: llamaResult.pages || [{ pageNumber: 1, markdown: fullText, text: fullText }],
         model: llamaResult.metadata.model,
       };
-
-      console.log(`LlamaIndex extracted ${ocrResponse.pages.length} pages from URL`);
     } else {
-      // Use Mistral parser (default) - PDF/DOCX only
-      const client = getMistralClient();
+      // Mistral Service
+      const mistralResult = await mistralService.processDocumentFromUrl(
+        document_url,
+        { includeImageBase64: include_image_base64 === 'true' || include_image_base64 === true }
+      );
 
-      const documentPayload = {
-        type: 'document_url',
-        documentUrl: document_url,
-      };
-
-      // Call Mistral OCR API
-      ocrResponse = await client.ocr.process({
-        model: 'mistral-ocr-latest',
-        document: documentPayload,
-        table_format: table_format === 'null' ? null : table_format,
-        extract_header: extract_header,
-        extract_footer: extract_footer,
-        include_image_base64: false,
-      });
-
-      // Extract and format the response
+      ocrResponse = mistralResult;
       const pages = ocrResponse.pages || [];
       fullText = pages.map(page => page.markdown).join('\n\n');
-
       parserMetadata = {
         parser: 'mistral',
         model: ocrResponse.model,
-        usage: ocrResponse.usage_info,
+        usage: ocrResponse.usage || ocrResponse.usageInfo,
       };
     }
 
-    // Return processed data
+    // Check if user wants to save the document
+    const shouldSave = save_document === 'true' || save_document === true;
+    let savedDocument = null;
+
+    if (shouldSave) {
+      const pagesData = ocrResponse.pages.map((page, index) => {
+        const pageText = page.text || page.markdown || '';
+        return {
+          pageNumber: page.page_number || index + 1,
+          text: pageText,
+          markdown: page.markdown || pageText,
+          metadata: {
+            wordCount: pageText.split(/\s+/).filter(w => w.length > 0).length,
+            characterCount: pageText.length,
+          },
+        };
+      });
+
+      savedDocument = await Document.create({
+        userId: req.user.userId,
+        fileName: path.basename(document_url),
+        fileSize: 0,
+        fileType: 'url',
+        originalText: fullText,
+        pages: ocrResponse.pages.length,
+        pagesData: pagesData,
+        detailedPages: ocrResponse.pages,
+        metadata: {
+          ...parserMetadata,
+          processedAt: new Date(),
+          pageCount: ocrResponse.pages.length,
+          documentUrl: document_url,
+          ...(book_name && { bookName: book_name.trim() }),
+          ...(author_name && { authorName: author_name.trim() }),
+          ...(category && { category: category.trim() }),
+        },
+      });
+    }
+
     return res.status(200).json({
       success: true,
-      message: 'Document processed successfully',
+      message: shouldSave ? 'Document processed and saved successfully' : 'Document processed successfully',
       data: {
         documentUrl: document_url,
         pages: ocrResponse.pages.length,
@@ -387,27 +320,11 @@ const processDocumentFromUrl = async (req, res) => {
         detailedPages: ocrResponse.pages,
         parser: parser,
         ...parserMetadata,
+        ...(savedDocument && { documentId: savedDocument._id, saved: true }),
       },
     });
   } catch (error) {
     console.error('OCR processing error:', error);
-
-    if (error.message && error.message.includes('MISTRAL_API_KEY')) {
-      return res.status(500).json({
-        success: false,
-        message: 'Mistral API key is not configured. Please set MISTRAL_API_KEY in environment variables.',
-        error: error.message,
-      });
-    }
-
-    if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) {
-      return res.status(500).json({
-        success: false,
-        message: 'LlamaIndex API key is not configured. Please set LLAMAINDEX_API_KEY in environment variables.',
-        error: error.message,
-      });
-    }
-
     return res.status(500).json({
       success: false,
       message: 'Failed to process document from URL',

@@ -1,37 +1,43 @@
 const Document = require('../models/Document');
 const Embeddings = require('../models/embedings');
-const chunkText = require('../utils/chunk');
 const { createEmbedding } = require('./openaiembedings');
 
+const runningJobs = new Map();
+
 async function processDocumentEmbeddings(documentId) {
-    const document = await Document.findById(documentId);
+    try {
+        const document = await Document.findById(documentId);
 
-    if (!document) throw new Error('Document not found');
+        if (!document) throw new Error('Document not found');
 
-    console.log('▶ Starting embeddings for:', document.fileName);
+        // Initialize progress if missing (first run safety)
+        if (!document.embeddingProgress) {
+            document.embeddingProgress = { currentPage: 0, currentChunk: 0 };
+        }
 
-    document.embeddingStatus = 'processing';
-    await document.save();
+        console.log('\n🚀 Starting embeddings for:', document.fileName);
+        console.log('▶ Resume From Page:', document.embeddingProgress.currentPage,
+            'Chunk:', document.embeddingProgress.currentChunk);
 
-    for (let p = document.embeddingProgress.currentPage; p < document.pagesData.length; p++) {
-        const page = document.pagesData[p];
-        console.log(`📄 Processing Page ${page.pageNumber}`);
+        document.embeddingStatus = 'processing';
+        await document.save();
 
-        const chunks = chunkText(page.text);
+        // Collect all pages into a single array for one-time submission
+        const allPages = document.pagesData;
+        const allInputs = allPages.map(page => {
+            const metadataStr = `[Metadata: Book: ${document.metadata?.bookName || 'N/A'}, Author: ${document.metadata?.authorName || 'N/A'}, Category: ${document.metadata?.category || 'N/A'}]`;
+            const summaryStr = `[Summary: ${page.summary || 'N/A'}]`;
+            return `${metadataStr} ${summaryStr}\n\n[Content]:\n${page.text}`;
+        });
 
-        for (
-            let c =
-                p === document.embeddingProgress.currentPage
-                    ? document.embeddingProgress.currentChunk
-                    : 0;
-            c < chunks.length;
-            c++
-        ) {
-            const chunk = chunks[c];
+        console.log(`\n🚀 Submitting ALL ${allPages.length} pages in a single synchronous request...`);
+        const embeddings = await createEmbedding(allInputs);
+        console.log('✅ Received all embeddings. Storing in database...');
 
-            console.log(`   ➤ Chunk ${c + 1}/${chunks.length}`);
-
-            const embedding = await createEmbedding(chunk);
+        // Process and save each embedding
+        for (let i = 0; i < allPages.length; i++) {
+            const page = allPages[i];
+            const embedding = embeddings[i];
 
             try {
                 await Embeddings.create({
@@ -39,33 +45,38 @@ async function processDocumentEmbeddings(documentId) {
                     userId: document.userId,
                     fileName: document.fileName,
                     pageNumber: page.pageNumber,
-                    text: chunk,
+                    chunkIndex: 0,
+                    text: page.text,
                     embedding,
                     metadata: {
                         bookName: document.metadata?.bookName,
                         authorName: document.metadata?.authorName,
                         category: document.metadata?.category,
+                        summary: page.summary,
                     },
                 });
             } catch (e) {
-                console.log('⚠ Duplicate chunk skipped');
+                // Unique index will prevent duplicates if resuming or re-running
+                if (e.code !== 11000) {
+                    console.error(`   ⚠ Error saving page ${page.pageNumber}:`, e.message);
+                }
             }
-
-            // ✅ SAVE PROGRESS AFTER EVERY CHUNK
-            document.embeddingProgress.currentPage = p;
-            document.embeddingProgress.currentChunk = c + 1;
-            await document.save();
         }
 
-        // reset chunk when page completes
-        document.embeddingProgress.currentChunk = 0;
+        console.log(`   ✅ All embeddings stored successfully`);
+
+        // All done
+        document.embeddingStatus = 'completed';
+        document.embeddingProgress = { currentPage: 0, currentChunk: 0 };
         await document.save();
+
+        console.log('\n🎉 Embedding Completed for:', document.fileName);
+
+    } catch (err) {
+        console.error('❌ Embedding Error:', err.message);
+    } finally {
+        runningJobs.delete(documentId);
     }
-
-    document.embeddingStatus = 'completed';
-    await document.save();
-
-    console.log('✅ Embedding Completed for:', document.fileName);
 }
 
-module.exports = { processDocumentEmbeddings };
+module.exports = { processDocumentEmbeddings, runningJobs };

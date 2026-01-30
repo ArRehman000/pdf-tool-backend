@@ -4,19 +4,36 @@ const embeddingsSchema = new mongoose.Schema({
     documentId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Document',
+        required: true,
         index: true,
     },
+
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
+        required: true,
         index: true,
     },
+
     fileName: String,
-    pageNumber: Number,
-    text: String,
+
+    pageNumber: {
+        type: Number,
+        required: true,
+    },
+
+    chunkIndex: {
+        type: Number,
+        required: true,
+    },
+
+    text: {
+        type: String,
+        required: true,
+    },
 
     embedding: {
-        type: [Number], // 1536 floats
+        type: [Number],
         required: true,
     },
 
@@ -25,19 +42,17 @@ const embeddingsSchema = new mongoose.Schema({
         authorName: String,
         category: String,
     },
-    embeddingStatus: {
-        type: String,
-        enum: ['not_started', 'processing', 'completed'],
-        default: 'not_started',
-    },
-    embeddingProgress: {
-        currentPage: { type: Number, default: 0 },
-        currentChunk: { type: Number, default: 0 },
-    },
+
     createdAt: {
         type: Date,
         default: Date.now,
     },
 });
+
+// 🔐 Prevent duplicate embeddings
+embeddingsSchema.index(
+    { documentId: 1, pageNumber: 1, chunkIndex: 1 },
+    { unique: true }
+);
 
 module.exports = mongoose.model('Embeddings', embeddingsSchema);

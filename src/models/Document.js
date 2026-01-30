@@ -60,6 +60,7 @@ const documentSchema = new mongoose.Schema({
       wordCount: Number,
       characterCount: Number,
     },
+    summary: String,
   }],
   // Legacy field for backward compatibility
   detailedPages: {
@@ -100,6 +101,17 @@ const documentSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  embeddingStatus: {
+    type: String,
+    enum: ['not_started', 'processing', 'completed'],
+    default: 'not_started',
+  },
+
+  embeddingProgress: {
+    currentPage: { type: Number, default: 0 },
+    currentChunk: { type: Number, default: 0 },
+  },
+
 });
 
 // Update the updatedAt timestamp before saving

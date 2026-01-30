@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Document = require('../models/Document');
 
 /**
@@ -190,6 +191,13 @@ const getDocumentStats = async (req, res) => {
       .sort('-createdAt')
       .limit(5);
 
+    // Calculate total pages across all documents
+    const totalPagesResult = await Document.aggregate([
+      { $match: { userId: new mongoose.Types.ObjectId(req.user.userId) } },
+      { $group: { _id: null, total: { $sum: '$pages' } } }
+    ]);
+    const totalPages = totalPagesResult.length > 0 ? totalPagesResult[0].total : 0;
+
     return res.status(200).json({
       success: true,
       message: 'Statistics retrieved successfully',
@@ -197,6 +205,7 @@ const getDocumentStats = async (req, res) => {
         totalDocuments,
         editedDocuments,
         originalDocuments: totalDocuments - editedDocuments,
+        totalPages, // Added field
         recentDocuments,
       },
     });

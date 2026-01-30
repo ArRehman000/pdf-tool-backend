@@ -21,10 +21,15 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-  origin: process.env.CLIENT_URL || 'https://pdocs.petalwebdev.com',
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
   credentials: true, // Allow cookies to be sent
   optionsSuccessStatus: 200,
 };
+// const corsOptions = {
+//   origin: process.env.CLIENT_URL || 'https://pdocs.petalwebdev.com',
+//   credentials: true, // Allow cookies to be sent
+//   optionsSuccessStatus: 200,
+// };
 app.use(cors(corsOptions));
 
 // Body parser middleware - Increase limit for large OCR text

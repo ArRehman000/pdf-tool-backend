@@ -11,6 +11,55 @@ const fs = require('fs');
 const LLAMAINDEX_BASE_URL = 'https://api.cloud.llamaindex.ai/api/v1';
 
 /**
+ * Shared parsing instruction for consistent JSON output
+ */
+const PARSING_INSTRUCTION = `
+You are a document parsing and normalization engine.
+
+Your task is to convert the document into a clean, structured, and embedding-ready JSON format.
+
+Follow these rules strictly:
+
+1. Extract text page by page.
+2. Remove OCR artifacts such as:
+    - broken words across lines
+    - repeated spaces
+    - random symbols or non-printable characters
+3. Preserve logical paragraphs and headings.
+4. Do NOT invent or rewrite content.
+5. Do NOT add explanations or commentary.
+6. Maintain the original meaning and wording.
+7. Normalize whitespace and line breaks.
+8. Remove headers, footers, and page numbers if repeated.
+9. Do NOT include raw OCR coordinates or bounding boxes.
+
+For EACH page:
+    - Provide the cleaned readable text.
+    - Generate a detailed summary (exactly 2 lines) that captures the whole page context and key information.
+    - The summary must be informational only (no opinions, no analysis).
+    - Do NOT say "this page discusses" or similar phrases.
+
+Output requirements:
+    - Output VALID JSON only.
+    - No markdown formatting (like \`\`\`json).
+    - No extra text outside JSON.
+    - The response MUST strictly follow the schema below.
+
+JSON Schema:
+    {
+      "pages": [
+        {
+          "page_number": number,
+          "clean_text": string,
+          "summary": string,
+          "word_count": number,
+          "character_count": number
+        }
+      ]
+    }
+`;
+
+/**
  * Get LlamaIndex API key from environment
  */
 const getApiKey = () => {
@@ -40,10 +89,10 @@ const createClient = () => {
  */
 const cleanParsedText = (text) => {
   if (!text) return '';
-  
+
   return text
-    // Remove replacement characters (�)
-    .replace(/�/g, '')
+    // Remove replacement characters
+    .replace(/\uFFFD/g, '')
     // Remove multiple dots/dashes that are OCR artifacts
     .replace(/\.{3,}/g, '...')
     // Fix multiple spaces
@@ -58,6 +107,201 @@ const cleanParsedText = (text) => {
     // Add proper spacing after page breaks
     .replace(/---/g, '\n\n---\n\n')
     .trim();
+};
+
+/**
+ * Monitor job status until completion
+ * @param {Object} client - Axios client
+ * @param {string} jobId - Job ID to monitor
+ * @returns {Promise<Object>} Final job result
+ */
+const monitorJob = async (client, jobId) => {
+  console.log(`Waiting for parsing job ${jobId} to complete...`);
+  let jobStatus = 'pending';
+  let attempts = 0;
+  const maxAttempts = 60; // 60 attempts * 2 seconds = 2 minutes max
+  let jobResult = null;
+
+  while (jobStatus !== 'SUCCESS' && attempts < maxAttempts) {
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+
+    const statusResponse = await client.get(`/parsing/job/${jobId}`);
+    jobStatus = statusResponse.data.status;
+
+    console.log(`Job status: ${jobStatus} (attempt ${attempts + 1}/${maxAttempts})`);
+
+    if (jobStatus === 'SUCCESS') {
+      jobResult = statusResponse.data;
+      return jobResult;
+    } else if (jobStatus === 'ERROR' || jobStatus === 'FAILED') {
+      throw new Error(`Parsing job failed with status: ${jobStatus}`);
+    }
+
+    attempts++;
+  }
+
+  throw new Error('Parsing job timed out');
+};
+
+/**
+ * Process the completed job result
+ * @param {Object} client - Axios client
+ * @param {string} jobId - Job ID
+ * @returns {Promise<Object>} Processed result with pages and text
+ */
+const processJobResult = async (client, jobId) => {
+  console.log('Fetching parsed text...');
+
+  // Try to get JSON result first (better structure for pages), fall back to text
+  let parsedText;
+  let parsedPages = [];
+  let jobStatus = 'SUCCESS';
+
+  try {
+    console.log('Attempting to fetch JSON result for better structure...');
+    const jsonResponse = await client.get(`/parsing/job/${jobId}/result/json`);
+
+    // Parse the data
+    let parsedData = jsonResponse.data;
+
+    // DEBUG: Log the raw first page to see if summary exists
+    if (parsedData && parsedData.pages && parsedData.pages.length > 0) {
+      console.log('DEBUG - Raw First Page from LlamaIndex:', JSON.stringify(parsedData.pages[0], null, 2));
+    } else {
+      console.log('DEBUG - No pages found in raw response or invalid structure');
+    }
+
+    // Handle case where data is a string (potentially JSON string)
+    if (typeof parsedData === 'string') {
+      console.log('Response is a string, attempting to parse...');
+      try {
+        // Remove markdown code blocks if present
+        const cleanString = parsedData.replace(/^```json\s*|\s*```$/g, '');
+        parsedData = JSON.parse(cleanString);
+        console.log('Successfully parsed string response');
+      } catch (parseError) {
+        console.log('Failed to parse string response, it might be raw text:', parseError.message);
+      }
+    }
+
+    // Extract pages from the expected JSON schema
+    if (parsedData && parsedData.pages && Array.isArray(parsedData.pages)) {
+      console.log(`Found ${parsedData.pages.length} pages in JSON structure`);
+
+      parsedData.pages.forEach((page, index) => {
+        // Handle both our custom schema and LlamaParse default schema
+        let pageText = page.clean_text || page.text || page.md || '';
+        let pageSummary = page.summary || '';
+
+        // Check if the markdown content is actually our requested JSON structure
+        if (page.md && (page.md.trim().startsWith('{') || page.md.trim().startsWith('```json'))) {
+          try {
+            let jsonStr = page.md;
+            // Remove code blocks if present
+            jsonStr = jsonStr.replace(/```json\s?|\s?```/g, '').trim();
+            const parsedMd = JSON.parse(jsonStr);
+
+            // If we found our standard structure inside
+            if (parsedMd.pages && parsedMd.pages.length > 0) {
+              const innerPage = parsedMd.pages[0];
+              pageText = innerPage.clean_text || innerPage.text || pageText;
+              pageSummary = innerPage.summary || pageSummary;
+            }
+          } catch (e) {
+            // Ignore parse errors, just use raw text
+            console.log('Failed to parse inner JSON from markdown, using raw text');
+          }
+        }
+
+        if (pageText.trim().length === 0) return;
+
+        const cleanedText = cleanParsedText(pageText);
+
+        // Determine page number
+        let pageNum = page.page_number || page.page || (index + 1);
+
+        parsedPages.push({
+          pageNumber: parseInt(pageNum, 10),
+          text: cleanedText,
+          markdown: cleanedText,
+          summary: pageSummary,
+          metadata: {
+            wordCount: page.word_count || cleanedText.split(/\s+/).filter(w => w.length > 0).length,
+            characterCount: page.character_count || cleanedText.length,
+          }
+        });
+      });
+
+      // Sort by page number
+      parsedPages.sort((a, b) => a.pageNumber - b.pageNumber);
+
+      // Create full text
+      parsedText = parsedPages.map(p => p.text).join('\n\n');
+      console.log(`✅ Extracted ${parsedPages.length} structured pages`);
+    } else if (parsedData && Array.isArray(parsedData)) {
+      // Sometimes LlamaParse returns an array of page objects directly
+      console.log(`Found array structure with ${parsedData.length} items`);
+      parsedData.forEach((page, index) => {
+        // Similar logic as above
+        const pageText = page.clean_text || page.text || page.md || '';
+        if (pageText.trim().length === 0) return;
+
+        const cleanedText = cleanParsedText(pageText);
+        parsedPages.push({
+          pageNumber: index + 1,
+          text: cleanedText,
+          markdown: cleanedText,
+          summary: page.summary || '',
+          metadata: {
+            wordCount: cleanedText.split(/\s+/).filter(w => w.length > 0).length,
+            characterCount: cleanedText.length,
+          }
+        });
+      });
+      parsedText = parsedPages.map(p => p.text).join('\n\n');
+    } else {
+      // Fallback to text if JSON structure isn't what we expect
+      console.log('JSON structure did not match expected schema, falling back to text endpoint');
+      const textResponse = await client.get(`/parsing/job/${jobId}/result/text`);
+      parsedText = cleanParsedText(textResponse.data.text || textResponse.data);
+    }
+  } catch (error) {
+    console.log('Error processing JSON result:', error.message);
+    const textResponse = await client.get(`/parsing/job/${jobId}/result/text`);
+    parsedText = cleanParsedText(textResponse.data.text || textResponse.data);
+  }
+
+  // Get metadata
+  const detailsResponse = await client.get(`/parsing/job/${jobId}`);
+  const jobDetails = detailsResponse.data;
+
+  // If no pages extracted yet, create a single page from full text
+  if (parsedPages.length === 0) {
+    parsedPages = [{
+      pageNumber: 1,
+      text: parsedText,
+      markdown: parsedText,
+      summary: 'No summary available',
+      metadata: {
+        wordCount: parsedText.split(/\s+/).filter(w => w.length > 0).length,
+        characterCount: parsedText.length,
+      }
+    }];
+  }
+
+  return {
+    success: true,
+    jobId: jobId,
+    text: parsedText,
+    pages: parsedPages,
+    status: jobStatus,
+    metadata: {
+      fileSize: jobDetails.file_size,
+      pageCount: jobDetails.page_count || parsedPages.length,
+      processingTime: jobDetails.processing_time,
+      model: 'llamaindex-parser-gen',
+    },
+  };
 };
 
 /**
@@ -76,6 +320,8 @@ const parseDocument = async (filePath, originalName) => {
     formData.append('file', fs.createReadStream(filePath), {
       filename: originalName,
     });
+    formData.append('parsing_instruction', PARSING_INSTRUCTION);
+    formData.append('premium_mode', 'true');
 
     const uploadResponse = await client.post('/parsing/upload', formData, {
       headers: {
@@ -86,196 +332,14 @@ const parseDocument = async (filePath, originalName) => {
     const jobId = uploadResponse.data.id;
     console.log(`File uploaded, job ID: ${jobId}`);
 
-    // Step 2: Poll for job completion
-    console.log('Waiting for parsing to complete...');
-    let jobStatus = 'pending';
-    let attempts = 0;
-    const maxAttempts = 60; // 60 attempts * 2 seconds = 2 minutes max
-    let jobResult = null;
+    // Step 2 & 3: Monitor and Process
+    await monitorJob(client, jobId);
+    return await processJobResult(client, jobId);
 
-    while (jobStatus !== 'SUCCESS' && attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
-
-      const statusResponse = await client.get(`/parsing/job/${jobId}`);
-      jobStatus = statusResponse.data.status;
-      
-      console.log(`Job status: ${jobStatus} (attempt ${attempts + 1}/${maxAttempts})`);
-
-      if (jobStatus === 'SUCCESS') {
-        jobResult = statusResponse.data;
-        break;
-      } else if (jobStatus === 'ERROR' || jobStatus === 'FAILED') {
-        throw new Error(`Parsing job failed with status: ${jobStatus}`);
-      }
-
-      attempts++;
-    }
-
-    if (jobStatus !== 'SUCCESS') {
-      throw new Error('Parsing job timed out');
-    }
-
-    // Step 3: Get the parsed text result
-    console.log('Fetching parsed text...');
-    
-    // Try to get JSON result first (better structure for pages), fall back to text
-    let parsedText;
-    let parsedPages = [];
-    
-    try {
-      console.log('Attempting to fetch JSON result for better structure...');
-      const jsonResponse = await client.get(`/parsing/job/${jobId}/result/json`);
-      
-      // Debug: Log the actual response structure
-      console.log('JSON Response structure:', JSON.stringify({
-        hasData: !!jsonResponse.data,
-        dataType: typeof jsonResponse.data,
-        dataKeys: jsonResponse.data ? Object.keys(jsonResponse.data).slice(0, 10) : [],
-        hasPages: !!(jsonResponse.data && jsonResponse.data.pages),
-        pagesType: jsonResponse.data?.pages ? typeof jsonResponse.data.pages : 'undefined',
-        isPagesArray: jsonResponse.data?.pages ? Array.isArray(jsonResponse.data.pages) : false,
-        pagesLength: jsonResponse.data?.pages ? (Array.isArray(jsonResponse.data.pages) ? jsonResponse.data.pages.length : 'not an array') : 'no pages'
-      }, null, 2));
-      
-      // If response is a string, try to parse it
-      let parsedData = jsonResponse.data;
-      if (typeof jsonResponse.data === 'string') {
-        console.log('Response is a string, attempting to parse...');
-        try {
-          parsedData = JSON.parse(jsonResponse.data);
-          console.log('Successfully parsed string response');
-        } catch (parseError) {
-          console.log('Failed to parse string response:', parseError.message);
-        }
-      }
-      
-      // Extract text from JSON pages array - LlamaIndex returns pages, not nodes
-      if (parsedData && parsedData.pages && Array.isArray(parsedData.pages)) {
-        console.log(`Found ${parsedData.pages.length} pages in JSON result`);
-        
-        // Debug: Log first page structure
-        if (parsedData.pages.length > 0) {
-          const firstPage = parsedData.pages[0];
-          console.log('First page keys:', Object.keys(firstPage));
-          if (firstPage.metadata) {
-            console.log('First page metadata keys:', Object.keys(firstPage.metadata));
-          }
-        }
-        
-        // Process each page
-        parsedData.pages.forEach((page, index) => {
-          const pageText = page.text || page.md || '';
-          if (pageText.trim().length === 0) return;
-          
-          const cleanedText = cleanParsedText(pageText);
-          
-          // Try to extract page number from various possible locations
-          let pageNum = null;
-          
-          // Check if page has a page property
-          if (page.page !== undefined && page.page !== null) {
-            pageNum = parseInt(page.page, 10);
-          }
-          
-          // Check metadata for page number
-          if ((!pageNum || isNaN(pageNum)) && page.metadata) {
-            if (page.metadata.page_label) {
-              pageNum = parseInt(page.metadata.page_label, 10);
-            } else if (page.metadata.page_number) {
-              pageNum = parseInt(page.metadata.page_number, 10);
-            } else if (page.metadata.page) {
-              pageNum = parseInt(page.metadata.page, 10);
-            }
-          }
-          
-          // Check top-level properties
-          if (!pageNum || isNaN(pageNum)) {
-            if (page.page_number) {
-              pageNum = parseInt(page.page_number, 10);
-            } else if (page.page_label) {
-              pageNum = parseInt(page.page_label, 10);
-            }
-          }
-          
-          // If still no valid page number, use sequential index
-          if (!pageNum || isNaN(pageNum)) {
-            pageNum = index + 1;
-          }
-          
-          parsedPages.push({
-            pageNumber: pageNum,
-            text: cleanedText,
-            markdown: cleanedText,
-            metadata: {
-              wordCount: cleanedText.split(/\s+/).filter(w => w.length > 0).length,
-              characterCount: cleanedText.length,
-            }
-          });
-        });
-        
-        // Sort by page number
-        parsedPages.sort((a, b) => a.pageNumber - b.pageNumber);
-        
-        // Create full text by joining all pages
-        parsedText = parsedPages.map(p => p.text).join('\n\n');
-        
-        console.log(`✅ Created ${parsedPages.length} pages from ${parsedData.pages.length} pages`);
-      } else {
-        // Fallback to text endpoint
-        console.log('JSON result has unexpected format or no pages, falling back to text');
-        const textResponse = await client.get(`/parsing/job/${jobId}/result/text`);
-        parsedText = cleanParsedText(textResponse.data.text || textResponse.data);
-      }
-    } catch (jsonError) {
-      console.log('JSON result not available, using text format:', jsonError.message);
-      const textResponse = await client.get(`/parsing/job/${jobId}/result/text`);
-      parsedText = cleanParsedText(textResponse.data.text || textResponse.data);
-    }
-
-    // Step 4: Get job details for metadata
-    const detailsResponse = await client.get(`/parsing/job/${jobId}`);
-    const jobDetails = detailsResponse.data;
-    
-    // If we couldn't extract pages from JSON, create a single page
-    if (parsedPages.length === 0) {
-      parsedPages = [{
-        pageNumber: 1,
-        text: parsedText,
-        markdown: parsedText,
-        metadata: {
-          wordCount: parsedText.split(/\s+/).filter(w => w.length > 0).length,
-          characterCount: parsedText.length,
-        }
-      }];
-    }
-
-    console.log(`📄 Final result: ${parsedPages.length} pages extracted (jobDetails.page_count: ${jobDetails.page_count})`);
-
-    return {
-      success: true,
-      jobId: jobId,
-      text: parsedText,
-      pages: parsedPages,
-      status: jobStatus,
-      metadata: {
-        fileSize: jobDetails.file_size,
-        pageCount: jobDetails.page_count || parsedPages.length,
-        processingTime: jobDetails.processing_time,
-        model: 'llamaindex-parser',
-      },
-    };
   } catch (error) {
     console.error('LlamaIndex parsing error:', error.response?.data || error.message);
-    
-    if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) {
-      throw error;
-    }
-
-    throw new Error(
-      error.response?.data?.message || 
-      error.message || 
-      'Failed to parse document with LlamaIndex'
-    );
+    if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) throw error;
+    throw new Error(error.response?.data?.message || error.message || 'Failed to parse document with LlamaIndex');
   }
 };
 
@@ -290,203 +354,30 @@ const parseDocumentFromUrl = async (documentUrl) => {
 
     // Step 1: Submit URL for parsing
     console.log('Submitting URL to LlamaIndex...');
-    const uploadResponse = await client.post('/parsing/upload', {
-      url: documentUrl,
+    const formData = new FormData();
+    formData.append('input_url', documentUrl);
+    formData.append('parsing_instruction', PARSING_INSTRUCTION);
+    formData.append('premium_mode', 'true');
+
+    // Note: When using formData with axios (and form-data package in Node), 
+    // we need to set headers from the form
+    const uploadResponse = await client.post('/parsing/upload', formData, {
+      headers: {
+        ...formData.getHeaders(),
+      },
     });
 
     const jobId = uploadResponse.data.id;
     console.log(`URL submitted, job ID: ${jobId}`);
 
-    // Step 2: Poll for job completion
-    console.log('Waiting for parsing to complete...');
-    let jobStatus = 'pending';
-    let attempts = 0;
-    const maxAttempts = 60;
-    let jobResult = null;
+    // Step 2 & 3: Monitor and Process
+    await monitorJob(client, jobId);
+    return await processJobResult(client, jobId);
 
-    while (jobStatus !== 'SUCCESS' && attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      const statusResponse = await client.get(`/parsing/job/${jobId}`);
-      jobStatus = statusResponse.data.status;
-      
-      console.log(`Job status: ${jobStatus} (attempt ${attempts + 1}/${maxAttempts})`);
-
-      if (jobStatus === 'SUCCESS') {
-        jobResult = statusResponse.data;
-        break;
-      } else if (jobStatus === 'ERROR' || jobStatus === 'FAILED') {
-        throw new Error(`Parsing job failed with status: ${jobStatus}`);
-      }
-
-      attempts++;
-    }
-
-    if (jobStatus !== 'SUCCESS') {
-      throw new Error('Parsing job timed out');
-    }
-
-    // Step 3: Get the parsed text result
-    console.log('Fetching parsed text...');
-    
-    // Try to get JSON result first (better structure for pages), fall back to text
-    let parsedText;
-    let parsedPages = [];
-    
-    try {
-      console.log('Attempting to fetch JSON result for better structure...');
-      const jsonResponse = await client.get(`/parsing/job/${jobId}/result/json`);
-      
-      // Debug: Log the actual response structure
-      console.log('JSON Response structure:', JSON.stringify({
-        hasData: !!jsonResponse.data,
-        dataType: typeof jsonResponse.data,
-        dataKeys: jsonResponse.data ? Object.keys(jsonResponse.data).slice(0, 10) : [],
-        hasPages: !!(jsonResponse.data && jsonResponse.data.pages),
-        pagesType: jsonResponse.data?.pages ? typeof jsonResponse.data.pages : 'undefined',
-        isPagesArray: jsonResponse.data?.pages ? Array.isArray(jsonResponse.data.pages) : false,
-        pagesLength: jsonResponse.data?.pages ? (Array.isArray(jsonResponse.data.pages) ? jsonResponse.data.pages.length : 'not an array') : 'no pages'
-      }, null, 2));
-      
-      // If response is a string, try to parse it
-      let parsedData = jsonResponse.data;
-      if (typeof jsonResponse.data === 'string') {
-        console.log('Response is a string, attempting to parse...');
-        try {
-          parsedData = JSON.parse(jsonResponse.data);
-          console.log('Successfully parsed string response');
-        } catch (parseError) {
-          console.log('Failed to parse string response:', parseError.message);
-        }
-      }
-      
-      // Extract text from JSON pages array - LlamaIndex returns pages, not nodes
-      if (parsedData && parsedData.pages && Array.isArray(parsedData.pages)) {
-        console.log(`Found ${parsedData.pages.length} pages in JSON result`);
-        
-        // Debug: Log first page structure
-        if (parsedData.pages.length > 0) {
-          const firstPage = parsedData.pages[0];
-          console.log('First page keys:', Object.keys(firstPage));
-          if (firstPage.metadata) {
-            console.log('First page metadata keys:', Object.keys(firstPage.metadata));
-          }
-        }
-        
-        // Process each page
-        parsedData.pages.forEach((page, index) => {
-          const pageText = page.text || page.md || '';
-          if (pageText.trim().length === 0) return;
-          
-          const cleanedText = cleanParsedText(pageText);
-          
-          // Try to extract page number from various possible locations
-          let pageNum = null;
-          
-          // Check if page has a page property
-          if (page.page !== undefined && page.page !== null) {
-            pageNum = parseInt(page.page, 10);
-          }
-          
-          // Check metadata for page number
-          if ((!pageNum || isNaN(pageNum)) && page.metadata) {
-            if (page.metadata.page_label) {
-              pageNum = parseInt(page.metadata.page_label, 10);
-            } else if (page.metadata.page_number) {
-              pageNum = parseInt(page.metadata.page_number, 10);
-            } else if (page.metadata.page) {
-              pageNum = parseInt(page.metadata.page, 10);
-            }
-          }
-          
-          // Check top-level properties
-          if (!pageNum || isNaN(pageNum)) {
-            if (page.page_number) {
-              pageNum = parseInt(page.page_number, 10);
-            } else if (page.page_label) {
-              pageNum = parseInt(page.page_label, 10);
-            }
-          }
-          
-          // If still no valid page number, use sequential index
-          if (!pageNum || isNaN(pageNum)) {
-            pageNum = index + 1;
-          }
-          
-          parsedPages.push({
-            pageNumber: pageNum,
-            text: cleanedText,
-            markdown: cleanedText,
-            metadata: {
-              wordCount: cleanedText.split(/\s+/).filter(w => w.length > 0).length,
-              characterCount: cleanedText.length,
-            }
-          });
-        });
-        
-        // Sort by page number
-        parsedPages.sort((a, b) => a.pageNumber - b.pageNumber);
-        
-        // Create full text by joining all pages
-        parsedText = parsedPages.map(p => p.text).join('\n\n');
-        
-        console.log(`✅ Created ${parsedPages.length} pages from ${parsedData.pages.length} pages`);
-      } else {
-        // Fallback to text endpoint
-        console.log('JSON result has unexpected format or no pages, falling back to text');
-        const textResponse = await client.get(`/parsing/job/${jobId}/result/text`);
-        parsedText = cleanParsedText(textResponse.data.text || textResponse.data);
-      }
-    } catch (jsonError) {
-      console.log('JSON result not available, using text format:', jsonError.message);
-      const textResponse = await client.get(`/parsing/job/${jobId}/result/text`);
-      parsedText = cleanParsedText(textResponse.data.text || textResponse.data);
-    }
-
-    // Step 4: Get job details for metadata
-    const detailsResponse = await client.get(`/parsing/job/${jobId}`);
-    const jobDetails = detailsResponse.data;
-    
-    // If we couldn't extract pages from JSON, create a single page
-    if (parsedPages.length === 0) {
-      parsedPages = [{
-        pageNumber: 1,
-        text: parsedText,
-        markdown: parsedText,
-        metadata: {
-          wordCount: parsedText.split(/\s+/).filter(w => w.length > 0).length,
-          characterCount: parsedText.length,
-        }
-      }];
-    }
-
-    console.log(`📄 Final result: ${parsedPages.length} pages extracted (jobDetails.page_count: ${jobDetails.page_count})`);
-
-    return {
-      success: true,
-      jobId: jobId,
-      text: parsedText,
-      pages: parsedPages,
-      status: jobStatus,
-      metadata: {
-        fileSize: jobDetails.file_size,
-        pageCount: jobDetails.page_count || parsedPages.length,
-        processingTime: jobDetails.processing_time,
-        model: 'llamaindex-parser',
-      },
-    };
   } catch (error) {
     console.error('LlamaIndex parsing error:', error.response?.data || error.message);
-    
-    if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) {
-      throw error;
-    }
-
-    throw new Error(
-      error.response?.data?.message || 
-      error.message || 
-      'Failed to parse document from URL with LlamaIndex'
-    );
+    if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) throw error;
+    throw new Error(error.response?.data?.message || error.message || 'Failed to parse document from URL with LlamaIndex');
   }
 };
 
