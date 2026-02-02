@@ -1,3 +1,4 @@
+const { coolifyConn } = require('../config/db');
 const mongoose = require('mongoose');
 
 /**
@@ -129,6 +130,6 @@ documentSchema.pre('save', function (next) {
 // Create index for faster queries
 documentSchema.index({ userId: 1, createdAt: -1 });
 
-const documentVectorModel = mongoose.model('Document', documentSchema);
+const documentVectorModel = coolifyConn.model('Document', documentSchema);
 
 module.exports = documentVectorModel;

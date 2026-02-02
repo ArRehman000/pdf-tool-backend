@@ -2,7 +2,8 @@ const { processDocumentEmbeddings, runningJobs } = require('../services/generate
 const Document = require('../models/Document');
 
 exports.startEmbedding = async (req, res) => {
-    const { documentId } = req.body;
+    const { documentId /*, storageType = 'mongo' */ } = req.body;
+    const storageType = 'mongo';
 
     // Check if embedding is already running
     if (runningJobs.has(documentId)) {
@@ -31,11 +32,11 @@ exports.startEmbedding = async (req, res) => {
         });
     }
 
-    console.log('▶ API Start Embedding (Sync):', documentId);
+    console.log(`▶ API Start Embedding (Sync) - ${storageType}:`, documentId);
 
     try {
         // Run synchronously so frontend stays in loading state
-        const job = processDocumentEmbeddings(documentId);
+        const job = processDocumentEmbeddings(documentId, storageType);
         runningJobs.set(documentId, job);
 
         await job;

@@ -1,3 +1,4 @@
+const { coolifyConn } = require('../config/db');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
@@ -73,6 +74,6 @@ userSchema.methods.toJSON = function () {
   return user;
 };
 
-const User = mongoose.model('User', userSchema);
+const User = coolifyConn.model('User', userSchema);
 
 module.exports = User;

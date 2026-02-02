@@ -1,20 +1,20 @@
 require('dotenv').config();
 const app = require('./app');
-const connectDB = require('./config/db');
+require('./config/db'); // Initialize connections
 
 /**
  * Validate required environment variables
  */
-const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
+// const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
 
-const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
+// const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
 
-if (missingEnvVars.length > 0) {
-  console.error('❌ Error: Missing required environment variables:');
-  missingEnvVars.forEach((envVar) => console.error(`   - ${envVar}`));
-  console.error('\nPlease create a .env file based on .env.example');
-  process.exit(1);
-}
+// if (missingEnvVars.length > 0) {
+//   console.error('❌ Error: Missing required environment variables:');
+//   missingEnvVars.forEach((envVar) => console.error(`   - ${envVar}`));
+//   console.error('\nPlease create a .env file based on .env.example');
+//   process.exit(1);
+// }
 
 /**
  * Server Configuration
@@ -26,8 +26,9 @@ const PORT = process.env.PORT || 5000;
  */
 const startServer = async () => {
   try {
-    // Connect to MongoDB
-    await connectDB();
+    // Connect and Initialize PG Vector (Optional - will log error if PG is down)
+    // const { initPgVector } = require('./config/pgConfig');
+    // await initPgVector();
 
     // Start listening
     const server = app.listen(PORT, () => {

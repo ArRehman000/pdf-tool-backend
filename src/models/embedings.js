@@ -1,3 +1,4 @@
+const { atlasConn } = require('../config/db');
 const mongoose = require('mongoose');
 
 const embeddingsSchema = new mongoose.Schema({
@@ -55,4 +56,4 @@ embeddingsSchema.index(
     { unique: true }
 );
 
-module.exports = mongoose.model('Embeddings', embeddingsSchema);
+module.exports = atlasConn.model('Embeddings', embeddingsSchema);
