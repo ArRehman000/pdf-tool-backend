@@ -91,6 +91,7 @@ const processDocument = async (req, res) => {
         ...(author_name && { authorName: author_name.trim() }),
         ...(category && { category: category.trim() }),
       },
+      isVerified: req.user.role === 'admin'
     });
 
     // Run the actual processing in the background (DO NOT AWAIT)
@@ -254,6 +255,7 @@ const processDocumentFromUrl = async (req, res) => {
         ...(author_name && { authorName: author_name.trim() }),
         ...(category && { category: category.trim() }),
       },
+      isVerified: req.user.role === 'admin'
     });
 
     // Background process
@@ -359,7 +361,8 @@ const getDocumentStatus = async (req, res) => {
     }
 
     // Check ownership
-    if (document.userId.toString() !== req.user.userId && req.user.role !== 'admin') {
+    // Convert both to string to ensure strictly equal comparison (ObjectId vs String issues)
+    if (document.userId.toString() !== req.user.userId.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 

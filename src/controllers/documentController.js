@@ -12,7 +12,11 @@ const getAllDocuments = async (req, res) => {
     const { page = 1, limit = 10, sort = '-createdAt', search } = req.query;
 
     // Build query object
-    const query = { userId: req.user.userId };
+    // Admin sees ALL verified documents from any user + their OWN documents (verified or not)
+    // User sees ONLY their own documents (verified or not)
+    const query = req.user.role === 'admin'
+      ? { $or: [{ isVerified: true }, { userId: req.user.userId }] }
+      : { userId: req.user.userId };
 
     // Add search functionality if search parameter is provided
     if (search && search.trim()) {
@@ -65,10 +69,12 @@ const getAllDocuments = async (req, res) => {
  */
 const getDocumentById = async (req, res) => {
   try {
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -108,10 +114,12 @@ const updateDocument = async (req, res) => {
       });
     }
 
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -147,10 +155,12 @@ const updateDocument = async (req, res) => {
  */
 const deleteDocument = async (req, res) => {
   try {
-    const document = await Document.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOneAndDelete(query);
 
     if (!document) {
       return res.status(404).json({
@@ -180,20 +190,28 @@ const deleteDocument = async (req, res) => {
  */
 const getDocumentStats = async (req, res) => {
   try {
-    const totalDocuments = await Document.countDocuments({ userId: req.user.userId });
+    const query = req.user.role === 'admin' ? {} : { userId: req.user.userId };
+
+    // For admin, we might want stats for all docs, or keep previous logic?
+    // User requested "user role when login he can also upload...".
+    // Admin stats are handled separately presumably, but if this endpoint is shared,
+    // we should respect role. Assuming for now this endpoint is "My Stats" or "Global Stats" depending on role.
+    const totalDocuments = await Document.countDocuments(query);
     const editedDocuments = await Document.countDocuments({
-      userId: req.user.userId,
+      ...query,
       status: 'edited',
     });
 
-    const recentDocuments = await Document.find({ userId: req.user.userId })
+    const recentDocuments = await Document.find(query)
       .select('fileName createdAt status pages')
       .sort('-createdAt')
       .limit(5);
 
+    const matchStage = req.user.role === 'admin' ? {} : { userId: new mongoose.Types.ObjectId(req.user.userId) };
+
     // Calculate total pages across all documents
     const totalPagesResult = await Document.aggregate([
-      { $match: { userId: new mongoose.Types.ObjectId(req.user.userId) } },
+      { $match: matchStage },
       { $group: { _id: null, total: { $sum: '$pages' } } }
     ]);
     const totalPages = totalPagesResult.length > 0 ? totalPagesResult[0].total : 0;
@@ -235,14 +253,39 @@ const searchDocuments = async (req, res) => {
       });
     }
 
-    const documents = await Document.find({
-      userId: req.user.userId,
+    const queryFilter = {
       $or: [
         { fileName: { $regex: query, $options: 'i' } },
         { originalText: { $regex: query, $options: 'i' } },
         { editedText: { $regex: query, $options: 'i' } },
       ],
-    })
+    };
+
+    if (req.user.role === 'admin') {
+      // Admin finds verified documents OR their own documents
+      queryFilter.$or = [
+        ...queryFilter.$or.map(clause => ({ ...clause, isVerified: true })), // Search only in verified docs
+        { userId: req.user.userId } // OR search in own docs
+      ];
+      // Note: The above logic for search is a bit complex in one query object.
+      // Re-simplifying:
+      const searchTerms = [
+        { fileName: { $regex: query, $options: 'i' } },
+        { originalText: { $regex: query, $options: 'i' } },
+        { editedText: { $regex: query, $options: 'i' } },
+      ];
+
+      queryFilter.$and = [
+        { $or: searchTerms },
+        { $or: [{ isVerified: true }, { userId: req.user.userId }] }
+      ];
+      delete queryFilter.$or; // Removed the flat $or
+    } else {
+      // User only finds their own documents
+      queryFilter.userId = req.user.userId;
+    }
+
+    const documents = await Document.find(queryFilter)
       .select('-detailedPages')
       .sort('-createdAt')
       .limit(20);
@@ -284,10 +327,12 @@ const findAndReplace = async (req, res) => {
       });
     }
 
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -392,10 +437,12 @@ const batchFindAndReplace = async (req, res) => {
       });
     }
 
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -500,10 +547,12 @@ const editTextPortion = async (req, res) => {
       });
     }
 
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -572,10 +621,12 @@ const previewFindAndReplace = async (req, res) => {
       });
     }
 
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -628,6 +679,48 @@ const previewFindAndReplace = async (req, res) => {
   }
 };
 
+
+
+/**
+ * Verify document
+ * POST /api/documents/:id/verify
+ * Protected route
+ */
+const verifyDocument = async (req, res) => {
+  try {
+    const query = { _id: req.params.id };
+    // Only allow verifcation if the user owns the document (or is admin)
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
+
+    if (!document) {
+      return res.status(404).json({
+        success: false,
+        message: 'Document not found',
+      });
+    }
+
+    document.isVerified = true;
+    await document.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Document verified successfully',
+      data: document,
+    });
+  } catch (error) {
+    console.error('Verify document error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to verify document',
+      error: error.message,
+    });
+  }
+};
+
 /**
  * Get specific page from document
  * GET /api/documents/:id/pages/:pageNumber
@@ -644,10 +737,12 @@ const getDocumentPage = async (req, res) => {
       });
     }
 
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -691,10 +786,12 @@ const getDocumentPage = async (req, res) => {
  */
 const getDocumentPages = async (req, res) => {
   try {
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -749,10 +846,12 @@ const updateDocumentPage = async (req, res) => {
     }
 
     // Find the document
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -838,10 +937,12 @@ const deleteDocumentPage = async (req, res) => {
     }
 
     // Find the document
-    const document = await Document.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const query = { _id: req.params.id };
+    if (req.user.role !== 'admin') {
+      query.userId = req.user.userId;
+    }
+
+    const document = await Document.findOne(query);
 
     if (!document) {
       return res.status(404).json({
@@ -920,4 +1021,5 @@ module.exports = {
   batchFindAndReplace,
   editTextPortion,
   previewFindAndReplace,
+  verifyDocument,
 };

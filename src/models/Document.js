@@ -108,6 +108,11 @@ const documentSchema = new mongoose.Schema({
     default: 'not_started',
   },
 
+  isVerified: {
+    type: Boolean,
+    default: false,
+  },
+
   embeddingProgress: {
     currentPage: { type: Number, default: 0 },
     currentChunk: { type: Number, default: 0 },

@@ -14,13 +14,14 @@ const {
   batchFindAndReplace,
   editTextPortion,
   previewFindAndReplace,
+  verifyDocument,
 } = require('../controllers/documentController');
 const authMiddleware = require('../middleware/authMiddleware');
 const roleMiddleware = require('../middleware/roleMiddleware');
 
 const router = express.Router();
 
-// All routes require authentication
+// roleMiddleware removed to allow user access - controller must verify ownership
 router.use(authMiddleware);
 
 /**
@@ -67,26 +68,26 @@ router.get('/:id/pages', getDocumentPages);
 router.get('/:id/pages/:pageNumber', getDocumentPage);
 
 /**
- * @route   PUT /api/documents/:id/pages/:pageNumber
+ * @route   PATCH /api/documents/:id/pages/:pageNumber
  * @desc    Update specific page in document
- * @access  Protected (Admin Only)
+ * @access  Protected (Admin & User)
  */
-router.put('/:id/pages/:pageNumber', roleMiddleware('admin'), updateDocumentPage);
+router.patch('/:id/pages/:pageNumber', updateDocumentPage);
 
 /**
  * @route   DELETE /api/documents/:id/pages/:pageNumber
  * @desc    Delete specific page from document
  * @access  Protected (Admin Only)
  */
-router.delete('/:id/pages/:pageNumber', roleMiddleware('admin'), deleteDocumentPage);
+router.delete('/:id/pages/:pageNumber', deleteDocumentPage);
 
 /**
- * @route   PUT /api/documents/:id
+ * @route   PATCH /api/documents/:id
  * @desc    Update/Edit document text (full replacement)
  * @access  Protected (Admin Only)
  * @body    { editedText: string }
  */
-router.put('/:id', roleMiddleware('admin'), updateDocument);
+router.patch('/:id', updateDocument);
 
 /**
  * @route   POST /api/documents/:id/find-replace
@@ -94,7 +95,7 @@ router.put('/:id', roleMiddleware('admin'), updateDocument);
  * @access  Protected (Admin Only)
  * @body    { find: string, replace: string, replaceAll?: boolean, caseSensitive?: boolean, useRegex?: boolean }
  */
-router.post('/:id/find-replace', roleMiddleware('admin'), findAndReplace);
+router.post('/:id/find-replace', findAndReplace);
 
 /**
  * @route   POST /api/documents/:id/batch-replace
@@ -102,7 +103,7 @@ router.post('/:id/find-replace', roleMiddleware('admin'), findAndReplace);
  * @access  Protected (Admin Only)
  * @body    { replacements: [{ find: string, replace: string }], caseSensitive?: boolean }
  */
-router.post('/:id/batch-replace', roleMiddleware('admin'), batchFindAndReplace);
+router.post('/:id/batch-replace', batchFindAndReplace);
 
 /**
  * @route   POST /api/documents/:id/edit-portion
@@ -110,7 +111,7 @@ router.post('/:id/batch-replace', roleMiddleware('admin'), batchFindAndReplace);
  * @access  Protected (Admin Only)
  * @body    { startPosition: number, endPosition: number, newText: string }
  */
-router.post('/:id/edit-portion', roleMiddleware('admin'), editTextPortion);
+router.post('/:id/edit-portion', editTextPortion);
 
 /**
  * @route   POST /api/documents/:id/preview-replace
@@ -118,13 +119,20 @@ router.post('/:id/edit-portion', roleMiddleware('admin'), editTextPortion);
  * @access  Protected (Admin Only)
  * @body    { find: string, replace: string, replaceAll?: boolean, caseSensitive?: boolean }
  */
-router.post('/:id/preview-replace', roleMiddleware('admin'), previewFindAndReplace);
+router.post('/:id/preview-replace', previewFindAndReplace);
+
+/**
+ * @route   POST /api/documents/:id/verify
+ * @desc    Verify document (User passes ownership check, Admin bypasses)
+ * @access  Protected (Admin & User)
+ */
+router.post('/:id/verify', verifyDocument);
 
 /**
  * @route   DELETE /api/documents/:id
  * @desc    Delete document
  * @access  Protected (Admin Only)
  */
-router.delete('/:id', roleMiddleware('admin'), deleteDocument);
+router.delete('/:id', deleteDocument);
 
 module.exports = router;

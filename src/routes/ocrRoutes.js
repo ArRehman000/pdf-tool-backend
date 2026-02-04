@@ -11,16 +11,16 @@ router.use(authMiddleware);
 /**
  * @route   POST /api/ocr/process
  * @desc    Process uploaded PDF/DOCX file with Mistral OCR or LlamaIndex
- * @access  Protected (Admin Only)
+ * @access  Protected (User or Admin)
  */
-router.post('/process', roleMiddleware('admin'), upload.single('document'), processDocument);
+router.post('/process', upload.single('document'), processDocument);
 
 /**
  * @route   POST /api/ocr/process-url
  * @desc    Process document from public URL with Mistral OCR or LlamaIndex
- * @access  Protected (Admin Only)
+ * @access  Protected (User or Admin)
  */
-router.post('/process-url', roleMiddleware('admin'), processDocumentFromUrl);
+router.post('/process-url', processDocumentFromUrl);
 
 /**
  * @route   GET /api/ocr/status/:id
