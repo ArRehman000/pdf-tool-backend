@@ -2,6 +2,73 @@ const mongoose = require('mongoose');
 const Document = require('../models/Document');
 
 /**
+ * Internal helper to sync whole document text back to individual pages
+ * Splitting is proportional based on original character counts
+ */
+const syncWholeToPages = (document) => {
+  if (!document.editedText || !document.pagesData || document.pagesData.length === 0) return;
+
+  // Use current page lengths as target capacities
+  // We take the current state of pagesData to determine how much text "fits" on each page
+  const targetCapacities = document.pagesData.map(p => Math.max(p.text?.length || 0, 1));
+  const newTotalText = document.editedText;
+  let currentPos = 0;
+
+  const updatedPages = [];
+
+  for (let i = 0; i < targetCapacities.length; i++) {
+    const capacity = targetCapacities[i];
+    let pageText = '';
+
+    if (i === targetCapacities.length - 1) {
+      // Last page takes all remaining text (handles overflow)
+      pageText = newTotalText.substring(currentPos);
+    } else {
+      // Fill to this page's original capacity
+      pageText = newTotalText.substring(currentPos, currentPos + capacity);
+    }
+
+    currentPos += pageText.length;
+
+    // Keep page if it has text OR it's the first page
+    if (pageText.length > 0 || i === 0) {
+      const page = document.pagesData[i];
+      page.text = pageText;
+      page.metadata = {
+        ...page.metadata,
+        wordCount: pageText.split(/\s+/).filter(word => word.length > 0).length,
+        characterCount: pageText.length
+      };
+      updatedPages.push(page);
+    }
+
+    // If we've distributed all text and have no more text for subsequent pages,
+    // we let the loop finish and the "pageText.length > 0" check will prune them.
+    if (currentPos >= newTotalText.length && i < targetCapacities.length - 1) {
+      // Small optimization: we can stop if we ran out of text, but we continue 
+      // to let the check above handle pruning clearly.
+    }
+  }
+
+  // Update document with synced pages
+  updatedPages.forEach((p, idx) => p.pageNumber = idx + 1);
+  document.pagesData = updatedPages;
+  document.pages = updatedPages.length;
+};
+
+/**
+ * Internal helper to sync individual pages back to the whole document text
+ */
+const syncPagesToWhole = (document) => {
+  if (!document.pagesData || document.pagesData.length === 0) return;
+
+  document.editedText = document.pagesData
+    .sort((a, b) => a.pageNumber - b.pageNumber)
+    .map(p => p.text || '')
+    .join('\n\n');
+};
+
+/**
  * Get all documents for the authenticated user
  * GET /api/documents
  * Protected route
@@ -37,6 +104,7 @@ const getAllDocuments = async (req, res) => {
     // Get documents with pagination and sorting
     const documents = await Document.find(query)
       .select('-detailedPages') // Exclude detailed pages for list view
+      .populate('userId', 'role') // Populate user role
       .sort(sort)
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -131,6 +199,10 @@ const updateDocument = async (req, res) => {
     // Update the edited text and status
     document.editedText = editedText;
     document.status = 'edited';
+
+    // Synchronize Whole -> Pages
+    syncWholeToPages(document);
+
     await document.save();
 
     return res.status(200).json({
@@ -393,6 +465,10 @@ const findAndReplace = async (req, res) => {
     // Update the document
     document.editedText = newText;
     document.status = 'edited';
+
+    // Synchronize Whole -> Pages
+    syncWholeToPages(document);
+
     await document.save();
 
     return res.status(200).json({
@@ -496,6 +572,10 @@ const batchFindAndReplace = async (req, res) => {
     // Update the document
     document.editedText = currentText;
     document.status = 'edited';
+
+    // Synchronize Whole -> Pages
+    syncWholeToPages(document);
+
     await document.save();
 
     return res.status(200).json({
@@ -581,6 +661,10 @@ const editTextPortion = async (req, res) => {
     // Update the document
     document.editedText = updatedText;
     document.status = 'edited';
+
+    // Synchronize Whole -> Pages
+    syncWholeToPages(document);
+
     await document.save();
 
     return res.status(200).json({
@@ -700,6 +784,13 @@ const verifyDocument = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'Document not found',
+      });
+    }
+
+    if (document.parsingStatus !== 'completed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Document is still being processed and cannot be verified yet',
       });
     }
 
@@ -896,6 +987,9 @@ const updateDocumentPage = async (req, res) => {
     document.status = 'edited';
     document.updatedAt = new Date();
 
+    // Synchronize Pages -> Whole
+    syncPagesToWhole(document);
+
     // Save the document
     await document.save();
 
@@ -982,6 +1076,9 @@ const deleteDocumentPage = async (req, res) => {
     // Mark as edited
     document.status = 'edited';
     document.updatedAt = new Date();
+
+    // Synchronize Pages -> Whole
+    syncPagesToWhole(document);
 
     // Save the document
     await document.save();

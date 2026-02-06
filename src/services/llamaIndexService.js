@@ -1,6 +1,7 @@
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
+const { PDFDocument } = require('pdf-lib');
 
 /**
  * LlamaIndex API Service
@@ -302,6 +303,12 @@ const processJobResult = async (client, jobId) => {
       pageCount: jobDetails.page_count || parsedPages.length,
       processingTime: jobDetails.processing_time,
       model: 'llamaindex-parser-gen',
+      usage: {
+        credits_used: jobDetails.credits_used || 0,
+        credits_total: jobDetails.credits_total || null,
+        is_free: jobDetails.is_free || false
+      },
+      jobDetails: jobDetails // Keep full details for future-proofing
     },
   };
 };
@@ -316,14 +323,37 @@ const parseDocument = async (filePath, originalName) => {
   try {
     const client = createClient();
 
-    // Step 1: Upload file
+    // Step 1: Check page count if PDF
+    let pageCount = 0;
+    let isLargeDocument = false;
+
+    if (originalName.toLowerCase().endsWith('.pdf')) {
+      try {
+        const fileBuffer = fs.readFileSync(filePath);
+        const pdfDoc = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
+        pageCount = pdfDoc.getPageCount();
+        console.log(`PDF page count detected: ${pageCount}`);
+
+        if (pageCount > 700) {
+          isLargeDocument = true;
+          console.log(`Large document detected (>700 pages). Falling back to standard mode.`);
+        }
+      } catch (pdfError) {
+        console.error('Error detecting PDF page count:', pdfError.message);
+      }
+    }
+
+    // Step 2: Upload file
     console.log('Uploading file to LlamaIndex...');
     const formData = new FormData();
     formData.append('file', fs.createReadStream(filePath), {
       filename: originalName,
     });
     formData.append('parsing_instruction', PARSING_INSTRUCTION);
-    formData.append('premium_mode', 'true');
+
+    // Fall back to standard mode (>700 pages) to avoid agentic parsing limits
+    const usePremium = !isLargeDocument;
+    formData.append('premium_mode', usePremium ? 'true' : 'false');
 
     const uploadResponse = await client.post('/parsing/upload', formData, {
       headers: {
@@ -334,14 +364,26 @@ const parseDocument = async (filePath, originalName) => {
     const jobId = uploadResponse.data.id;
     console.log(`File uploaded, job ID: ${jobId}`);
 
-    // Step 2 & 3: Monitor and Process
+    // Step 3 & 4: Monitor and Process
     await monitorJob(client, jobId);
     return await processJobResult(client, jobId);
 
   } catch (error) {
-    console.error('LlamaIndex parsing error:', error.response?.data || error.message);
+    const errorData = error.response?.data;
+    const errorMessage = errorData?.detail || errorData?.message || error.message;
+
+    console.error('LlamaIndex parsing error:', errorData || error.message);
+
+    if (error.response?.status === 402 || (errorMessage && errorMessage.includes('credits'))) {
+      throw new Error('LlamaIndex credits exhausted. Please switch to Mistral OCR for processing.');
+    }
+
+    if (errorMessage && errorMessage.includes('700')) {
+      throw new Error('Document exceeds LlamaIndex agentic limit (700 pages). Our auto-fallback failed, please try Mistral OCR.');
+    }
+
     if (error.message && error.message.includes('LLAMAINDEX_API_KEY')) throw error;
-    throw new Error(error.response?.data?.message || error.message || 'Failed to parse document with LlamaIndex');
+    throw new Error(errorMessage || 'Failed to parse document with LlamaIndex');
   }
 };
 

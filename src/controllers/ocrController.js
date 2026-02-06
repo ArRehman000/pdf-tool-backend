@@ -3,6 +3,7 @@ const path = require('path');
 const Document = require('../models/Document');
 const llamaIndexService = require('../services/llamaIndexService');
 const mistralService = require('../services/mistralService');
+const { PDFDocument } = require('pdf-lib');
 
 /**
  * Delete temporary uploaded file
@@ -56,14 +57,28 @@ const processDocument = async (req, res) => {
     // Get options from request body
     const {
       parser = 'mistral',
-      table_format = 'html',
+      table_format = null,
       extract_header = false,
       extract_footer = false,
       include_image_base64 = false,
       book_name,
       author_name,
       category,
+      document_annotation,
+      bbox_annotation,
     } = req.body;
+
+    // Parse stringified JSON if needed (Multer sends as strings)
+    let parsedDocAnnotation = document_annotation;
+    let parsedBboxAnnotation = bbox_annotation;
+
+    if (typeof document_annotation === 'string' && document_annotation) {
+      try { parsedDocAnnotation = JSON.parse(document_annotation); } catch (e) { console.warn('Failed to parse document_annotation:', e); }
+    }
+
+    if (typeof bbox_annotation === 'string' && bbox_annotation) {
+      try { parsedBboxAnnotation = JSON.parse(bbox_annotation); } catch (e) { console.warn('Failed to parse bbox_annotation:', e); }
+    }
 
     // Validate parser option
     if (parser !== 'mistral' && parser !== 'llama') {
@@ -75,6 +90,26 @@ const processDocument = async (req, res) => {
     }
 
     console.log(`Processing file: ${req.file.originalname} with ${parser} parser (Async)`);
+
+    // Detect page count for safety checks
+    let detectedPageCount = 0;
+    if (fileExtension === '.pdf') {
+      try {
+        const fileBuffer = fs.readFileSync(filePath);
+        const pdfDoc = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
+        detectedPageCount = pdfDoc.getPageCount();
+        console.log(`Detected page count for ${req.file.originalname}: ${detectedPageCount}`);
+      } catch (pageError) {
+        console.warn(`Failed to detect page count for ${req.file.originalname}:`, pageError.message);
+      }
+    }
+
+    // Mistral Safety Checks: document_annotation is limited to 8 pages
+    let finalDocAnnotation = parsedDocAnnotation;
+    if (parser === 'mistral' && parsedDocAnnotation && detectedPageCount > 8) {
+      console.warn(`⚠️ Document has ${detectedPageCount} pages. Mistral "document_annotation" is limited to 8 pages. Disabling annotation to prevent 503 error.`);
+      finalDocAnnotation = null;
+    }
 
     // Create a database entry with 'processing' status first
     const newDocument = await Document.create({
@@ -105,6 +140,8 @@ const processDocument = async (req, res) => {
         extract_header,
         extract_footer,
         include_image_base64,
+        document_annotation: finalDocAnnotation,
+        bbox_annotation: parsedBboxAnnotation,
       }
     ).catch(err => {
       console.error(`Background processing failed for ${newDocument._id}:`, err);
@@ -150,17 +187,47 @@ const backgroundProcessDocument = async (documentId, filePath, originalName, par
         jobId: llamaResult.jobId,
         pageCount: llamaResult.metadata.pageCount,
         processingTime: llamaResult.metadata.processingTime,
+        usage: llamaResult.metadata.usage,
       };
       ocrResponse = {
         pages: llamaResult.pages || [{ pageNumber: 1, text: fullText, markdown: fullText }],
         model: llamaResult.metadata.model,
       };
     } else {
-      const mistralResult = await mistralService.processDocument(
-        filePath,
-        originalName,
-        { includeImageBase64: options.include_image_base64 === 'true' || options.include_image_base64 === true }
-      );
+      let mistralResult;
+      try {
+        mistralResult = await mistralService.processDocument(
+          filePath,
+          originalName,
+          {
+            includeImageBase64: options.include_image_base64 === 'true' || options.include_image_base64 === true,
+            extractHeader: options.extract_header === 'true' || options.extract_header === true,
+            extractFooter: options.extract_footer === 'true' || options.extract_footer === true,
+            tableFormat: options.table_format || null,
+            documentAnnotation: options.document_annotation,
+            bboxAnnotation: options.bbox_annotation,
+          }
+        );
+      } catch (mistralError) {
+        // Retry without annotations if they were requested and failed
+        if (options.document_annotation || options.bbox_annotation) {
+          console.warn(`Mistral OCR with annotations failed (likely 503 or page limit). Retrying without annotations... Error: ${mistralError.message}`);
+          mistralResult = await mistralService.processDocument(
+            filePath,
+            originalName,
+            {
+              includeImageBase64: options.include_image_base64 === 'true' || options.include_image_base64 === true,
+              extractHeader: options.extract_header === 'true' || options.extract_header === true,
+              extractFooter: options.extract_footer === 'true' || options.extract_footer === true,
+              tableFormat: options.table_format || null,
+              documentAnnotation: null,
+              bboxAnnotation: null,
+            }
+          );
+        } else {
+          throw mistralError;
+        }
+      }
       ocrResponse = mistralResult;
       fullText = ocrResponse.pages.map(page => page.markdown).join('\n\n');
       parserMetadata = {
@@ -206,6 +273,7 @@ const backgroundProcessDocument = async (documentId, filePath, originalName, par
       'metadata.pageCount': ocrResponse.pages.length,
       'metadata.processingTime': parserMetadata.processingTime,
       'metadata.usage': parserMetadata.usage,
+      'metadata.documentAnnotation': ocrResponse.documentAnnotation,
     });
 
     console.log(`✅ Background processing completed for ${documentId}`);
@@ -231,7 +299,22 @@ const processDocumentFromUrl = async (req, res) => {
       book_name,
       author_name,
       category,
+      document_annotation,
+      bbox_annotation,
+      table_format = null,
     } = req.body;
+
+    // Parse stringified JSON if needed
+    let parsedDocAnnotation = document_annotation;
+    let parsedBboxAnnotation = bbox_annotation;
+
+    if (typeof document_annotation === 'string' && document_annotation) {
+      try { parsedDocAnnotation = JSON.parse(document_annotation); } catch (e) { console.warn('Failed to parse document_annotation:', e); }
+    }
+
+    if (typeof bbox_annotation === 'string' && bbox_annotation) {
+      try { parsedBboxAnnotation = JSON.parse(bbox_annotation); } catch (e) { console.warn('Failed to parse bbox_annotation:', e); }
+    }
 
     if (!document_url) {
       return res.status(400).json({ success: false, message: 'document_url is required' });
@@ -259,7 +342,10 @@ const processDocumentFromUrl = async (req, res) => {
     });
 
     // Background process
-    backgroundProcessUrl(newDocument._id, document_url, parser).catch(err => {
+    backgroundProcessUrl(newDocument._id, document_url, parser, {
+      document_annotation: parsedDocAnnotation,
+      bbox_annotation: parsedBboxAnnotation,
+    }).catch(err => {
       console.error(`Background URL processing failed for ${newDocument._id}:`, err);
     });
 
@@ -285,7 +371,7 @@ const processDocumentFromUrl = async (req, res) => {
 /**
  * Internal helper for background URL processing
  */
-const backgroundProcessUrl = async (documentId, documentUrl, parser) => {
+const backgroundProcessUrl = async (documentId, documentUrl, parser, options = {}) => {
   try {
     let fullText, ocrResponse, parserMetadata;
 
@@ -303,7 +389,30 @@ const backgroundProcessUrl = async (documentId, documentUrl, parser) => {
         model: llamaResult.metadata.model
       };
     } else {
-      const mistralResult = await mistralService.processDocumentFromUrl(documentUrl);
+      let mistralResult;
+      try {
+        mistralResult = await mistralService.processDocumentFromUrl(documentUrl, {
+          documentAnnotation: options.document_annotation,
+          bboxAnnotation: options.bbox_annotation,
+          extractHeader: true,
+          extractFooter: true,
+          tableFormat: options.table_format || null
+        });
+      } catch (mistralError) {
+        // Retry without annotations if they failed
+        if (options.document_annotation || options.bbox_annotation) {
+          console.warn(`Mistral URL OCR with annotations failed. Retrying without annotations... Error: ${mistralError.message}`);
+          mistralResult = await mistralService.processDocumentFromUrl(documentUrl, {
+            documentAnnotation: null,
+            bboxAnnotation: null,
+            extractHeader: true,
+            extractFooter: true,
+            tableFormat: options.table_format || null
+          });
+        } else {
+          throw mistralError;
+        }
+      }
       ocrResponse = mistralResult;
       fullText = ocrResponse.pages.map(page => page.markdown).join('\n\n');
       parserMetadata = {
@@ -336,6 +445,7 @@ const backgroundProcessUrl = async (documentId, documentUrl, parser) => {
       'metadata.pageCount': ocrResponse.pages.length,
       'metadata.processingTime': parserMetadata.processingTime,
       'metadata.usage': parserMetadata.usage,
+      'metadata.documentAnnotation': ocrResponse.documentAnnotation,
     });
 
     console.log(`✅ Background URL processing completed for ${documentId}`);

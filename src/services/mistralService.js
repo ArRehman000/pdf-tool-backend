@@ -30,64 +30,6 @@ class MistralService {
     }
 
     /**
-     * Clean markdown formatting and convert to plain text
-     * @param {string} markdown - Markdown text from Mistral OCR
-     * @returns {string} Clean plain text
-     */
-    cleanMarkdownToText(markdown) {
-        if (!markdown) return '';
-
-        let text = markdown;
-
-        // Remove markdown headers (##, ###, etc.) but keep the text
-        text = text.replace(/^#{1,6}\s+/gm, '');
-
-        // Remove bold/italic markers but keep text
-        text = text.replace(/\*\*\*(.+?)\*\*\*/g, '$1'); // Bold + Italic
-        text = text.replace(/\*\*(.+?)\*\*/g, '$1');     // Bold
-        text = text.replace(/\*(.+?)\*/g, '$1');         // Italic
-        text = text.replace(/__(.+?)__/g, '$1');         // Bold (underscore)
-        text = text.replace(/_(.+?)_/g, '$1');           // Italic (underscore)
-
-        // Remove strikethrough
-        text = text.replace(/~~(.+?)~~/g, '$1');
-
-        // Remove inline code markers
-        text = text.replace(/`(.+?)`/g, '$1');
-
-        // Remove code block markers
-        text = text.replace(/```[\s\S]*?```/g, '');
-        text = text.replace(/~~~[\s\S]*?~~~/g, '');
-
-        // Remove links but keep text [text](url) -> text
-        text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-
-        // Remove image markers ![alt](url)
-        text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
-
-        // Remove horizontal rules
-        text = text.replace(/^[-*_]{3,}\s*$/gm, '');
-
-        // Remove blockquote markers
-        text = text.replace(/^>\s+/gm, '');
-
-        // Remove list markers (ordered and unordered)
-        text = text.replace(/^\s*[-*+]\s+/gm, '');
-        text = text.replace(/^\s*\d+\.\s+/gm, '');
-
-        // Remove table formatting
-        text = text.replace(/\|/g, ' ');
-        text = text.replace(/^[-:|\s]+$/gm, '');
-
-        // Clean up excessive whitespace
-        text = text.replace(/\n{3,}/g, '\n\n');  // Max 2 consecutive newlines
-        text = text.replace(/[ \t]{2,}/g, ' ');  // Multiple spaces to single space
-        text = text.replace(/^\s+|\s+$/gm, '');  // Trim each line
-
-        return text.trim();
-    }
-
-    /**
      * Process a document file using Mistral OCR
      * @param {string} filePath - Path to the local file
      * @param {string} fileName - Original file name
@@ -127,16 +69,21 @@ class MistralService {
                 extractHeader: options.extractHeader,
                 extractFooter: options.extractFooter,
                 tableFormat: options.tableFormat,
+                // Add annotation support
+                documentAnnotationFormat: options.documentAnnotation,
+                bboxAnnotationFormat: options.bboxAnnotation,
+
             });
 
             // Cleanup: Delete file from Mistral storage
             await this.deleteMistralFile(uploadedFileId);
 
-            // Filter blank pages and clean markdown
+            // Filter blank pages and keep high-quality markdown
             const filteredPages = this.filterBlankPages(response.pages).map(page => ({
                 ...page,
-                text: this.cleanMarkdownToText(page.markdown), // Add clean text version
-                markdown: page.markdown // Keep original markdown
+                // Strip markdown headers from text field but keep them in markdown field
+                text: this.stripMarkdownHeaders(page.markdown),
+                markdown: page.markdown
             }));
 
             console.log(`Filtered ${response.pages.length - filteredPages.length} blank pages`);
@@ -145,6 +92,7 @@ class MistralService {
                 pages: filteredPages,
                 model: response.model,
                 usage: response.usageInfo,
+                documentAnnotation: response.documentAnnotation,
                 originalResponse: response
             };
 
@@ -177,13 +125,16 @@ class MistralService {
                 extractHeader: options.extractHeader,
                 extractFooter: options.extractFooter,
                 tableFormat: options.tableFormat,
+                // Add annotation support
+                documentAnnotationFormat: options.documentAnnotation,
+                bboxAnnotationFormat: options.bboxAnnotation,
             });
 
-            // Filter blank pages and clean markdown
+            // Filter blank pages and keep high-quality markdown
             const filteredPages = this.filterBlankPages(response.pages).map(page => ({
                 ...page,
-                text: this.cleanMarkdownToText(page.markdown), // Add clean text version
-                markdown: page.markdown // Keep original markdown
+                text: this.stripMarkdownHeaders(page.markdown),
+                markdown: page.markdown
             }));
 
             console.log(`Filtered ${response.pages.length - filteredPages.length} blank pages`);
@@ -192,6 +143,7 @@ class MistralService {
                 pages: filteredPages,
                 model: response.model,
                 usage: response.usageInfo,
+                documentAnnotation: response.documentAnnotation,
                 originalResponse: response
             };
         } catch (error) {
@@ -211,6 +163,19 @@ class MistralService {
         } catch (error) {
             console.error(`Failed to delete Mistral file ${fileId}:`, error.message);
         }
+    }
+
+    /**
+     * Remove markdown header markers (#) from text
+     * @param {string} markdown - Markdown text
+     * @returns {string} Text without header markers
+     */
+    stripMarkdownHeaders(markdown) {
+        if (!markdown) return '';
+        // Remove lines that are just headers or remove # from the start of lines
+        return markdown
+            .replace(/^#{1,6}\s+/gm, '') // Remove #, ## etc at the start of lines
+            .trim();
     }
 }
 
